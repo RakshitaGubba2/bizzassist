@@ -107,6 +107,14 @@
                             {% endfor %}
                         </select>
                     </div>
+                    <div>
+                        <label>Campaign sender Gmail</label>
+                        <input type="email" name="campaign_sender_email" value="{{ campaign_sender_email if campaign_sender_email is defined else '' }}" placeholder="yourname@gmail.com (optional)">
+                    </div>
+                    <div>
+                        <label>Campaign sender App Password</label>
+                        <input type="password" name="campaign_sender_password" placeholder="16-character Gmail App Password (optional)">
+                    </div>
                 </div>
 
                 <div class="section-title">Marketing / Financial Status</div>

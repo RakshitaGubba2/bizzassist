@@ -25,13 +25,17 @@
         {% endfor %}
     </div>
     <form method="post" style="display:flex; gap:8px; flex-wrap:wrap;">
-        <input class="input" name="message" placeholder="Ask about inventory, orders, finance, growth strategy..." required style="flex:1; min-width:200px;">
+        <input id="assistant-input" class="input" name="message" placeholder="Ask about inventory, orders, finance, growth strategy..." required style="flex:1; min-width:200px;">
         <button class="btn btn-primary" type="submit">Send</button>
     </form>
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <button type="button" class="btn btn-secondary" onclick="startVoiceRecording()">🎤 Record voice</button>
+        <button type="button" class="btn btn-secondary" onclick="focusMessageInput()">Type instead</button>
+        <span id="voice-status" style="color:#4b5563; font-size:13px;">Record your voice, then tap Send to continue.</span>
+    </div>
     <form method="post" action="{{ url_for('assistant_reset') }}" style="margin-top:10px;" onsubmit="return confirm('Clear all chat messages?');">
         <button class="btn btn-secondary" type="submit">Reset chat</button>
     </form>
-    <button onclick="startVoice()">🎤</button>
 </div>
  
 
@@ -42,19 +46,84 @@ document.querySelectorAll("[data-suggest]").forEach(function(btn) {
         if (input) input.value = btn.getAttribute("data-suggest");
     });
 });
-function startVoice() {
-    const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-    recognition.start();
 
-    recognition.onresult = function(event) {
-        const text = event.results[0][0].transcript;
+function updateVoiceStatus(message) {
+    const status = document.getElementById('voice-status');
+    if (status) status.textContent = message;
+}
 
-        fetch('/voice_assistant', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({message: text})
-        }).then(() => location.reload());
-    };
+function focusMessageInput() {
+    const input = document.getElementById('assistant-input');
+    if (input) {
+        input.focus();
+        input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    updateVoiceStatus('Type your message in the box above.');
+}
+
+function startVoiceRecording() {
+    const secureContext = window.isSecureContext || window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+    if (!secureContext) {
+        updateVoiceStatus('Use localhost or HTTPS for voice input.');
+        focusMessageInput();
+        return;
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        updateVoiceStatus('Microphone access is not available in this browser.');
+        focusMessageInput();
+        return;
+    }
+
+    updateVoiceStatus('Recording voice... speak now for up to 8 seconds.');
+
+    navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(function(stream) {
+            const chunks = [];
+            const mediaRecorder = new MediaRecorder(stream);
+
+            mediaRecorder.ondataavailable = function(event) {
+                if (event.data.size > 0) {
+                    chunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = function() {
+                const blob = new Blob(chunks, { type: 'audio/webm' });
+                const reader = new FileReader();
+                reader.onloadend = function() {
+                    const base64 = reader.result.split(',')[1];
+                    fetch('/voice_assistant', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ audio: base64, language: navigator.language || 'en-US' })
+                    })
+                    .then(function(response) { return response.json(); })
+                    .then(function(data) {
+                        const input = document.getElementById('assistant-input');
+                        if (input) {
+                            input.value = input.value || (data.message || '');
+                        }
+                        updateVoiceStatus('Voice recorded. Please click Send to continue.');
+                    })
+                    .catch(function() {
+                        updateVoiceStatus('Voice recording could not be processed. Please type your message instead.');
+                    });
+                };
+                reader.readAsDataURL(blob);
+                stream.getTracks().forEach(function(track) { track.stop(); });
+            };
+
+            mediaRecorder.start();
+            window.setTimeout(function() {
+                try { mediaRecorder.stop(); } catch (e) {}
+            }, 8000);
+        })
+        .catch(function(error) {
+            updateVoiceStatus('Microphone permission was blocked: ' + (error.message || 'Please allow microphone access and try again.'));
+            focusMessageInput();
+        });
 }
 </script>
 

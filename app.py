@@ -1,17 +1,22 @@
 from datetime import date, datetime
+from email.message import EmailMessage
+import base64
 import json
 import os
 import re
 import sqlite3
-import google.generativeai as genai
-from flask import Flask, redirect, render_template, request, session, url_for
+import smtplib
+from flask import Flask, redirect, render_template, request, session, url_for, jsonify
+
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-bizassist-secret-change-me")
-import json
-from openai import OpenAI
-from flask import jsonify
-'''client = OpenAI(api_key="    ")'''
+app.config["GEMINI_API_KEY"] = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMMA_API_KEY", "")
+app.config["GEMINI_MODEL"] = os.environ.get("GEMMA_MODEL") or os.environ.get("GEMINI_MODEL", "gemma-3-4b-it")
 
 def ai_extract_command(text):
     prompt = f"""
@@ -49,8 +54,23 @@ def ai_extract_command(text):
 @app.route("/voice_assistant", methods=["POST"])
 def voice_assistant():
     conn = get_db_connection()
-    data = request.get_json()
-    user_message = data.get("message", "")
+    data = request.get_json(silent=True) or {}
+    user_message = str(data.get("message", "") or "").strip()
+    audio_b64 = str(data.get("audio", "") or "").strip()
+    language = normalize_language_code(data.get("language") or request.headers.get("Accept-Language") or "")
+    if not language or language == "auto":
+        language = resolve_user_language(user_message, request)
+
+    if audio_b64:
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+            user_message = transcribe_audio_bytes(audio_bytes, language)
+        except Exception:
+            user_message = ""
+
+    if not user_message:
+        conn.close()
+        return jsonify({"reply": localized_fallback_response(language), "language": language, "voice_language": speech_language(language)})
 
     now = datetime.now().isoformat(timespec="seconds")
 
@@ -59,91 +79,9 @@ def voice_assistant():
         ("user", user_message, now),
     )
 
-    try:
-        command = ai_extract_command(user_message)
-        intent = command.get("intent")
-
-        response = "Done."
-
-        # ADD CUSTOMER
-        if intent == "add_customer":
-            conn.execute(
-                """
-                INSERT INTO customers
-                (name, email, phone, segment, total_orders, total_spent, last_purchase)
-                VALUES (?, ?, ?, ?, 0, 0, ?)
-                """,
-                (
-                    command["name"],
-                    command["email"],
-                    command["phone"],
-                    command.get("segment", "New"),
-                    date.today().isoformat(),
-                ),
-            )
-            response = f"Customer {command['name']} added."
-
-        # UPDATE CUSTOMER
-        elif intent == "update_customer":
-            conn.execute(
-                """
-                UPDATE customers
-                SET email = COALESCE(?, email),
-                    phone = COALESCE(?, phone),
-                    segment = COALESCE(?, segment)
-                WHERE name = ?
-                """,
-                (
-                    command.get("email"),
-                    command.get("phone"),
-                    command.get("segment"),
-                    command["name"],
-                ),
-            )
-            response = f"Customer {command['name']} updated."
-
-        # ADD ORDER
-        elif intent == "add_order":
-            conn.execute(
-                """
-                INSERT INTO orders
-                (order_code, customer_name, items_count, total_amount, status, priority, order_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    f"ORD-{int(datetime.now().timestamp())}",
-                    command["name"],
-                    command.get("items", 1),
-                    command.get("amount", 0),
-                    "Pending",
-                    "Medium",
-                    date.today().isoformat(),
-                ),
-            )
-            response = "Order added."
-
-        # ADD EXPENSE
-        elif intent == "add_expense":
-            conn.execute(
-                """
-                INSERT INTO expenses (category, description, amount, expense_date)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    "General",
-                    "Voice entry",
-                    command.get("amount", 0),
-                    date.today().isoformat(),
-                ),
-            )
-            response = "Expense added."
-
-        else:
-            metrics = query_metrics(conn)
-            response = f"Revenue {format_inr(metrics['revenue'])}, Profit {format_inr(metrics['net_profit'])}"
-
-    except Exception:
-        response = "Sorry, I couldn't understand."
+    response = localized_fallback_response(language)
+    if user_message:
+        response = build_assistant_response(conn, user_message, language)
 
     conn.execute(
         "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
@@ -153,9 +91,66 @@ def voice_assistant():
     conn.commit()
     conn.close()
 
-    return jsonify({"reply": response})
-app.config["GEMINI_API_KEY"] = ""
-app.config["GEMINI_MODEL"] = "gemini-pro"
+    return jsonify({
+        "reply": response,
+        "language": language,
+        "voice_language": speech_language(language),
+    })
+DEFAULT_CAMPAIGN_RECIPIENTS = ()
+
+
+def is_valid_email(email):
+    value = (email or "").strip()
+    return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value))
+
+
+def gather_campaign_recipients(conn):
+    rows = conn.execute("SELECT email FROM customers").fetchall()
+    recipients = []
+    seen = set()
+    for row in rows:
+        email = (row["email"] or "").strip().lower()
+        if email and is_valid_email(email) and email not in seen:
+            recipients.append(email)
+            seen.add(email)
+
+    for email in DEFAULT_CAMPAIGN_RECIPIENTS:
+        normalized = (email or "").strip().lower()
+        if normalized and is_valid_email(normalized) and normalized not in seen:
+            recipients.append(normalized)
+            seen.add(normalized)
+    return recipients
+
+
+def send_campaign_emails(campaign, recipients, sender_email, sender_password):
+    sender_email = (sender_email or "").strip()
+    sender_password = (sender_password or "").strip()
+    if not sender_email or not sender_password:
+        return 0
+
+    sent_count = 0
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as smtp:
+        smtp.starttls()
+        smtp.login(sender_email, sender_password)
+        for recipient in recipients:
+            msg = EmailMessage()
+            msg["Subject"] = f"New Campaign: {campaign['title']}"
+            msg["From"] = sender_email
+            msg["To"] = recipient
+            msg.set_content(
+                (
+                    f"Hello,\n\n"
+                    f"We are launching a new campaign for {campaign['segment']} customers.\n\n"
+                    f"Campaign: {campaign['title']}\n"
+                    f"Priority: {campaign['priority']}\n"
+                    f"Expected ROI: {campaign['expected_roi']}%\n\n"
+                    f"Details:\n{campaign['description']}\n\n"
+                    f"Thank you."
+                )
+            )
+            smtp.send_message(msg)
+            sent_count += 1
+    return sent_count
 
 def get_db_connection():
     conn = sqlite3.connect("database.db")
@@ -264,7 +259,9 @@ def init_db():
             marketing_spend REAL NOT NULL DEFAULT 0,
             growth_target REAL NOT NULL DEFAULT 0,
             account_type TEXT NOT NULL DEFAULT 'business',
-            location TEXT NOT NULL DEFAULT ''
+            location TEXT NOT NULL DEFAULT '',
+            campaign_sender_email TEXT NOT NULL DEFAULT '',
+            campaign_sender_password TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS shop_discounts (
@@ -295,6 +292,8 @@ def init_db():
     for stmt in (
         "ALTER TABLE business_profile ADD COLUMN account_type TEXT NOT NULL DEFAULT 'business'",
         "ALTER TABLE business_profile ADD COLUMN location TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE business_profile ADD COLUMN campaign_sender_email TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE business_profile ADD COLUMN campaign_sender_password TEXT NOT NULL DEFAULT ''",
     ):
         try:
             conn.execute(stmt)
@@ -317,6 +316,7 @@ def init_db():
         pass
     conn.commit()
     seed_demo_data(conn)
+    ensure_required_customers(conn)
     conn.close()
 
 
@@ -354,9 +354,11 @@ def seed_demo_data(conn):
             """,
             [
                 ("Sarah Johnson", "sarah.j@email.com", "555-0101", "VIP", 12, 145688, today),
-                ("Michael Chen", "mchen@email.com", "555-0102", "Regular", 8, 89234, today),
-                ("Emma Davis", "emma.d@email.com", "555-0103", "VIP", 15, 172543, today),
-                ("James Wilson", "jwilson@email.com", "555-0104", "New", 3, 22108, today),
+                ("Michael Chen", "gshrijan@gmail.com", "555-0102", "Regular", 8, 89234, today),
+                ("Emma Davis", "gubbarakshita@gmail.com", "555-0103", "VIP", 15, 172543, today),
+                ("James Wilson", "sushanth2625@gmail.com", "555-0104", "New", 3, 22108, today),
+                ("Sushanth Kumar", "sushanth2625@gmail.com", "555-0110", "VIP", 4, 45210, today),
+                ("Shrijan Gupta", "gshrijan55@gmail.com", "555-0111", "Regular", 2, 11880, today),
             ],
         )
     if counts["orders"] == 0:
@@ -433,6 +435,30 @@ def seed_demo_data(conn):
                 ("Portable charger 20k mAh", 16.0, demo_loc, "PowerUp", now),
                 ("Winter jacket", 25.0, demo_loc, "Urban Outerwear", now),
             ],
+        )
+    conn.commit()
+
+
+def ensure_required_customers(conn):
+    today = date.today().isoformat()
+    must_have = [
+        ("Sushanth Kumar", "sushanth2625@gmail.com", "555-0110", "VIP"),
+        ("Shrijan Gupta", "gshrijan55@gmail.com", "555-0111", "Regular"),
+    ]
+    for name, email, phone, segment in must_have:
+        exists = conn.execute(
+            "SELECT id FROM customers WHERE lower(email) = lower(?)",
+            (email,),
+        ).fetchone()
+        if exists:
+            continue
+        conn.execute(
+            """
+            INSERT INTO customers
+            (name, email, phone, segment, total_orders, total_spent, last_purchase)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (name, email, phone, segment, 0, 0, today),
         )
     conn.commit()
 
@@ -838,36 +864,205 @@ def build_ai_context(conn):
 def _gemini_api_key():
     return (
         (app.config.get("GEMINI_API_KEY") or "").strip()
+        or (os.environ.get("GEMINI_API_KEY") or "").strip()
         or (os.environ.get("GOOGLE_API_KEY") or "").strip()
+        or (os.environ.get("GEMMA_API_KEY") or "").strip()
     )
 
 
-def call_gemini(conn, user_message):
-    """All assistant replies go through Google Gemini when an API key is set."""
+def normalize_language_code(language):
+    if not language:
+        return "en"
+    code = str(language).strip().lower().replace("_", "-")
+    if code.startswith("en"):
+        return "en"
+    if code.startswith("hi"):
+        return "hi"
+    if code.startswith("es"):
+        return "es"
+    if code.startswith("fr"):
+        return "fr"
+    if code.startswith("de"):
+        return "de"
+    if code.startswith("ar"):
+        return "ar"
+    if code.startswith("pt"):
+        return "pt"
+    if code.startswith("it"):
+        return "it"
+    if code.startswith("ja"):
+        return "ja"
+    if code.startswith("zh"):
+        return "zh"
+    if code.startswith("ko"):
+        return "ko"
+    if code.startswith("te"):
+        return "te"
+    if code.startswith("ta"):
+        return "ta"
+    return "en"
+
+
+def detect_language(text, fallback="en"):
+    if text is None:
+        return fallback
+    s = str(text).lower()
+    if any("\u0600" <= ch <= "\u06FF" for ch in s):
+        return "ar"
+    if any("\u0900" <= ch <= "\u097F" for ch in s):
+        return "hi"
+    if any("\u0B00" <= ch <= "\u0C7F" for ch in s):
+        return "te"
+    if any("\u0B80" <= ch <= "\u0BFF" for ch in s):
+        return "ta"
+    if any("\u4E00" <= ch <= "\u9FFF" for ch in s):
+        return "zh"
+    if any("\u3040" <= ch <= "\u30FF" for ch in s):
+        return "ja"
+
+    spanish_markers = ["hola", "gracias", "necesito", "como", "por favor", "pedido", "cliente", "inventario", "finanzas"]
+    french_markers = ["bonjour", "merci", "besoin", "comment", "s'il vous plaît", "commande", "client", "inventaire", "finance"]
+    german_markers = ["hallo", "bitte", "wie", "kann", "hilfe", "bestand", "bestellung", "kunde", "finanzen"]
+    arabic_markers = ["مرحبا", "شكرا", "كيف", "مساعدة", "الطلب", "العميل", "المخزون", "المالية"]
+    if any(marker in s for marker in spanish_markers):
+        return "es"
+    if any(marker in s for marker in french_markers):
+        return "fr"
+    if any(marker in s for marker in german_markers):
+        return "de"
+    if any(marker in s for marker in arabic_markers):
+        return "ar"
+    return fallback
+
+
+def resolve_user_language(text, request_obj=None):
+    requested = ""
+    if request_obj is not None:
+        requested = (request_obj.form.get("language") or request_obj.headers.get("Accept-Language") or "").strip()
+    if requested:
+        return normalize_language_code(requested)
+    return detect_language(text)
+
+
+def speech_language(language):
+    return {
+        "en": "en-US",
+        "hi": "hi-IN",
+        "es": "es-ES",
+        "fr": "fr-FR",
+        "de": "de-DE",
+        "ar": "ar-SA",
+        "pt": "pt-PT",
+        "it": "it-IT",
+        "ja": "ja-JP",
+        "zh": "zh-CN",
+        "ko": "ko-KR",
+        "te": "te-IN",
+        "ta": "ta-IN",
+    }.get(normalize_language_code(language), "en-US")
+
+
+def transcribe_audio_bytes(audio_bytes, language="en"):
+    if not audio_bytes:
+        return ""
+
+    try:
+        import speech_recognition as sr
+    except ImportError:
+        return ""
+
+    try:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(tmp_path) as source:
+            audio_data = recognizer.record(source)
+        text = recognizer.recognize_google(audio_data, language=language)
+        os.unlink(tmp_path)
+        return text.strip()
+    except Exception:
+        return ""
+
+
+def translate_to_language(text, language):
+    language = normalize_language_code(language)
+    if language == "en":
+        return text
+    if language == "hi":
+        return text
+    if language == "es":
+        return text
+    if language == "fr":
+        return text
+    if language == "de":
+        return text
+    if language == "ar":
+        return text
+    return text
+
+
+def localized_fallback_response(language):
+    language = normalize_language_code(language)
+    fallbacks = {
+        "en": "I can help with your business questions. Ask about inventory, orders, finance, or marketing.",
+        "hi": "मैं आपके बिज़नेस सवालों में मदद कर सकता हूँ। स्टॉक, ऑर्डर, वित्त या मार्केटिंग के बारे में पूछें।",
+        "es": "Puedo ayudar con sus preguntas de negocio. Pregunte por inventario, pedidos, finanzas o marketing.",
+        "fr": "Je peux vous aider avec vos questions commerciales. Demandez à propos de l'inventaire, des commandes, des finances ou du marketing.",
+        "de": "Ich kann Ihnen bei Ihren Geschäftsfragen helfen. Fragen Sie nach Lagerbestand, Bestellungen, Finanzen oder Marketing.",
+        "ar": "أستطيع مساعدتك في أسئلة العمل. اسأل عن المخزون أو الطلبات أو التمويل أو التسويق.",
+        "pt": "Posso ajudar com suas perguntas de negócios. Pergunte sobre estoque, pedidos, finanças ou marketing.",
+        "it": "Posso aiutarti con le tue domande aziendali. Chiedi di inventario, ordini, finanza o marketing.",
+        "ja": "ビジネスの質問にお手伝いできます。在庫、注文、財務、マーケティングについて聞いてください。",
+        "zh": "我可以帮助您解答业务问题。可以询问库存、订单、财务或营销相关内容。",
+        "ko": "비즈니스 질문을 도와드릴 수 있습니다. 재고, 주문, 재무 또는 마케팅에 대해 물어보세요.",
+        "te": "మీ వ్యాపార ప్రశ్నలకు నేను సహాయం చేయగలను. స్టాక్, ఆర్డర్లు, ఫైనాన్స్ లేదా మార్కెటింగ్ గురించి అడగండి.",
+        "ta": "உங்கள் வணிக கேள்விகளுக்கு நான் உதவ முடியும். இருப்பு, ஆர்டர்கள், நிதி அல்லது மார்க்கெட்டிங் பற்றி கேளுங்கள்.",
+    }
+    return fallbacks.get(language, fallbacks["en"])
+
+
+def call_gemini(conn, user_message, language="en"):
+    """All assistant replies go through Google Gemini/Gemma when an API key is set."""
     api_key = _gemini_api_key()
     if not api_key:
         return None
 
     try:
-        import google.generativeai as genai
+        import google.generativeai as generative_ai
     except ImportError:
-        return (
-            "The Gemini package is not installed. Run: pip install google-generativeai"
-        )
+        return None
 
     try:
-        genai.configure(api_key=api_key)
-        model_name = (app.config.get("GEMINI_MODEL") or "gemini-1.5-flash").strip()
+        generative_ai.configure(api_key=api_key)
+        model_name = (app.config.get("GEMMA_MODEL") or app.config.get("GEMINI_MODEL") or "gemma-3-4b-it").strip()
         context = build_ai_context(conn)
+        language_name = {
+            "en": "English",
+            "hi": "Hindi",
+            "es": "Spanish",
+            "fr": "French",
+            "de": "German",
+            "ar": "Arabic",
+            "pt": "Portuguese",
+            "it": "Italian",
+            "ja": "Japanese",
+            "zh": "Chinese",
+            "ko": "Korean",
+            "te": "Telugu",
+            "ta": "Tamil",
+        }.get(normalize_language_code(language), "English")
         prompt = (
             "You are a friendly business assistant for BizAssist AI. "
-            "Answer in plain, simple language for non-technical users. "
-            "Use the business context below when the question is about this business; "
-            "otherwise give short, practical general business advice.\n\n"
+            f"Reply in {language_name} using natural, conversational language. "
+            "Do not answer in English if the user wrote in another language. "
+            "If the question is about this business, use the business context below; "
+            "otherwise give a short, practical business answer.\n\n"
             f"Business context (JSON):\n{json.dumps(context, default=str)}\n\n"
             f"User question:\n{user_message}"
         )
-        model = genai.GenerativeModel(model_name)
+        model = generative_ai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         try:
             text = (response.text or "").strip()
@@ -876,24 +1071,21 @@ def call_gemini(conn, user_message):
         if text:
             return text
         return (
-            "Gemini returned no text (it may have been blocked for safety). "
+            "Gemma returned no text (it may have been blocked for safety). "
             "Try rephrasing your question."
         )
     except Exception as exc:
-        return f"Gemini error: {exc!s}. Check GEMINI_MODEL and your API key."
+        return f"Gemma error: {exc!s}. Check GEMMA_MODEL or GEMINI_MODEL and your API key."
 
 
-def build_assistant_response(conn, user_message):
+def build_assistant_response(conn, user_message, language="en"):
     nq = normalize_assistant_question(user_message)
     if nq and nq in CANNED_ASSISTANT_RESPONSES:
-        return CANNED_ASSISTANT_RESPONSES[nq]
-    reply = call_gemini(conn, user_message)
+        return translate_to_language(CANNED_ASSISTANT_RESPONSES[nq], language)
+    reply = call_gemini(conn, user_message, language)
     if reply is not None:
-        return reply
-    return (
-        "No AI API key is configured, so only the built-in questions (buttons above) get full answers offline. "
-        "Tap a suggested question and press Send, or add GEMINI_API_KEY / GOOGLE_API_KEY for open-ended chat."
-    )
+        return translate_to_language(reply, language)
+    return localized_fallback_response(language)
 
 
 def assistant_reset_welcome():
@@ -985,7 +1177,7 @@ def root():
         if get_account_type(profile) == "personal":
             return redirect(url_for("marketing"))
         return redirect(url_for("dashboard"))
-    return render_template("account_choice.html")
+    return redirect(url_for("login"))
 
 
 @app.route("/logout", methods=["GET", "POST"])
@@ -1050,13 +1242,15 @@ def personal_signup():
 def login():
     conn = get_db_connection()
     existing = get_business_profile(conn)
-    if request.method == "GET" and existing and session_matches_profile(existing):
-        conn.close()
-        if get_account_type(existing) == "personal":
-            return redirect(url_for("marketing"))
-        return redirect(url_for("dashboard"))
 
     if request.method == "POST":
+        existing_data = dict(existing) if existing else {}
+        sender_email = pick_text(
+            request.form, "campaign_sender_email", existing_data.get("campaign_sender_email", "")
+        )
+        sender_password = pick_text(
+            request.form, "campaign_sender_password", existing_data.get("campaign_sender_password", "")
+        )
         loc = pick_text(request.form, "location", "")
         if not loc:
             conn.close()
@@ -1072,14 +1266,15 @@ def login():
                 selected_month_revenue="",
                 selected_month_expenses="",
                 location_error="Please enter your shop or business location.",
+                campaign_sender_email=sender_email,
             ), 400
         monthly_revenue = float(request.form["monthly_revenue"] or 0)
         monthly_expenses = float(request.form["monthly_expenses"] or 0)
         conn.execute(
             """
             INSERT INTO business_profile
-            (id, owner_name, business_name, email, phone, business_type, monthly_revenue, monthly_expenses, marketing_spend, growth_target, account_type, location)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'business', ?)
+            (id, owner_name, business_name, email, phone, business_type, monthly_revenue, monthly_expenses, marketing_spend, growth_target, account_type, location, campaign_sender_email, campaign_sender_password)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'business', ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 owner_name = excluded.owner_name,
                 business_name = excluded.business_name,
@@ -1091,19 +1286,23 @@ def login():
                 marketing_spend = excluded.marketing_spend,
                 growth_target = excluded.growth_target,
                 account_type = 'business',
-                location = excluded.location
+                location = excluded.location,
+                campaign_sender_email = excluded.campaign_sender_email,
+                campaign_sender_password = excluded.campaign_sender_password
             """,
             (
-                request.form["owner_name"],
-                request.form["business_name"],
-                request.form["email"],
-                request.form["phone"],
-                request.form["business_type"],
+                pick_text(request.form, "owner_name", existing_data.get("owner_name", "Owner Account")),
+                pick_text(request.form, "business_name", existing_data.get("business_name", "Demo Business")),
+                pick_text(request.form, "email", existing_data.get("email", "owner@example.com")),
+                pick_text(request.form, "phone", existing_data.get("phone", "0000000000")),
+                pick_text(request.form, "business_type", existing_data.get("business_type", "Retail")),
                 monthly_revenue,
                 monthly_expenses,
-                float(request.form["marketing_spend"] or 0),
-                float(request.form["growth_target"] or 0),
+                pick_float(request.form, "marketing_spend", existing_data.get("marketing_spend", 0)),
+                pick_float(request.form, "growth_target", existing_data.get("growth_target", 0)),
                 loc,
+                sender_email,
+                sender_password,
             ),
         )
         update_current_month_snapshot(conn, monthly_revenue, monthly_expenses)
@@ -1111,6 +1310,8 @@ def login():
         conn.commit()
         conn.close()
         session["account_auth"] = "business"
+        session["campaign_sender_email"] = sender_email
+        session["campaign_sender_password"] = sender_password
         return redirect(url_for("dashboard"))
 
     selected_month = previous_month_key()
@@ -1129,6 +1330,7 @@ def login():
         selected_month_revenue=(selected_row["revenue"] if selected_row else ""),
         selected_month_expenses=(selected_row["expenses"] if selected_row else ""),
         location_error="",
+        campaign_sender_email=(session.get("campaign_sender_email") or (login_profile["campaign_sender_email"] if login_profile else "")),
     )
 
 
@@ -1197,8 +1399,8 @@ def business_profile():
         conn.execute(
             """
             INSERT INTO business_profile
-            (id, owner_name, business_name, email, phone, business_type, monthly_revenue, monthly_expenses, marketing_spend, growth_target, account_type, location)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'business', ?)
+            (id, owner_name, business_name, email, phone, business_type, monthly_revenue, monthly_expenses, marketing_spend, growth_target, account_type, location, campaign_sender_email, campaign_sender_password)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'business', ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 owner_name = excluded.owner_name,
                 business_name = excluded.business_name,
@@ -1210,7 +1412,9 @@ def business_profile():
                 marketing_spend = excluded.marketing_spend,
                 growth_target = excluded.growth_target,
                 account_type = 'business',
-                location = excluded.location
+                location = excluded.location,
+                campaign_sender_email = excluded.campaign_sender_email,
+                campaign_sender_password = excluded.campaign_sender_password
             """,
             (
                 pick_text(request.form, "owner_name", existing_data.get("owner_name", "Owner Account")),
@@ -1223,6 +1427,8 @@ def business_profile():
                 pick_float(request.form, "marketing_spend", existing_data.get("marketing_spend", 0)),
                 pick_float(request.form, "growth_target", existing_data.get("growth_target", 0)),
                 loc,
+                pick_text(request.form, "campaign_sender_email", existing_data.get("campaign_sender_email", "")),
+                pick_text(request.form, "campaign_sender_password", existing_data.get("campaign_sender_password", "")),
             ),
         )
         update_current_month_snapshot(conn, monthly_revenue, monthly_expenses)
@@ -1249,6 +1455,7 @@ def business_profile():
         selected_month_revenue=(selected_row["revenue"] if selected_row else ""),
         selected_month_expenses=(selected_row["expenses"] if selected_row else ""),
         location_error="",
+        campaign_sender_email=(profile["campaign_sender_email"] if profile else ""),
     )
 
 
@@ -1599,7 +1806,28 @@ def launch_campaign(campaign_id):
     if redir:
         return redir
     conn = get_db_connection()
+    campaign = conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
     conn.execute("UPDATE campaigns SET status = 'Launched' WHERE id = ?", (campaign_id,))
+    if campaign:
+        recipients = gather_campaign_recipients(conn)
+        profile = get_business_profile(conn)
+        sender_email = (
+            session.get("campaign_sender_email")
+            or (profile["campaign_sender_email"] if profile else "")
+            or os.environ.get("MARKETING_SENDER_EMAIL")
+            or ""
+        ).strip()
+        sender_password = (
+            session.get("campaign_sender_password")
+            or (profile["campaign_sender_password"] if profile else "")
+            or os.environ.get("MARKETING_SENDER_PASSWORD")
+            or ""
+        ).strip()
+        try:
+            send_campaign_emails(campaign, recipients, sender_email, sender_password)
+        except Exception:
+            # Campaign launch should continue even if mail delivery fails.
+            pass
     conn.commit()
     conn.close()
     return redirect(url_for("marketing"))
@@ -1797,14 +2025,15 @@ def assistant():
         return redir
     conn = get_db_connection()
     if request.method == "POST":
-        user_message = request.form["message"].strip()
+        user_message = request.form.get("message", "").strip()
         if user_message:
+            language = resolve_user_language(user_message, request)
             now = datetime.now().isoformat(timespec="seconds")
             conn.execute(
                 "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
                 ("user", user_message, now),
             )
-            response = build_assistant_response(conn, user_message)
+            response = build_assistant_response(conn, user_message, language)
             conn.execute(
                 "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
                 ("assistant", response, now),
