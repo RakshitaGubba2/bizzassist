@@ -16,7 +16,7 @@ To resume or rebuild one language only, use for example:
 ```powershell
 python manage.py prewarm-translations --language te
 ```
-<img width="298" height="438" alt="Screenshot 2026-07-28 223308" src="https://github.com/user-attachments/assets/7b404bdb-74ab-4c7a-9ec1-c8d7e2bf59c3" />
+<img width="1497" height="716" alt="Screenshot 2026-07-28 223308" src="https://github.com/user-attachments/assets/7b404bdb-74ab-4c7a-9ec1-c8d7e2bf59c3" />
 <img width="1497" height="716" alt="Screenshot 2026-07-28 223241" src="https://github.com/user-attachments/assets/bbd644c0-621e-4171-abb7-f0dc03c00e43" />
 <img width="1497" height="712" alt="Screenshot 2026-07-28 223156" src="https://github.com/user-attachments/assets/3066dfe3-0d32-4998-aa70-a903afb9afc0" />
 <img width="1495" height="725" alt="Screenshot 2026-07-28 223119" src="https://github.com/user-attachments/assets/4527f93b-26a6-46a5-929f-71af29448735" />
