@@ -215,20 +215,6 @@ The AI system gracefully handles:
 - 🎙️ Speech Recognition Errors
 
 Instead of displaying technical errors, users receive meaningful localized responses.
-
----
-
-# ⭐ Why Gemma?
-
-Google Gemma was selected because it provides:
-
-- 🌍 Excellent Multilingual Understanding
-- 🧠 Strong Contextual Reasoning
-- 📊 Business-Oriented Recommendations
-- ⚡ Fast Inference through NVIDIA NIM
-- 🔗 Seamless Flask Integration
-- 💬 Natural Conversational Responses
-
 ---
 
 # 🎯 Conclusion
