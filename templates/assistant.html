@@ -1,56 +1,107 @@
- {% extends "base.html" %}
-{% block title %}AI Assistant - BizAssist AI{% endblock %}
+{% extends "base.html" %}
+{% block title %}{{ t("AI Assistant - BizAssist AI") }}{% endblock %}
 {% block content %}
- 
-<h1 class="page-title">Chat Assistant</h1>
-<p class="page-subtitle">Works fully offline for the 30 built-in questions below—no API key required. Other questions need a Gemini API key.</p>
+
+<h1 class="page-title">{{ t("Chat Assistant") }}</h1>
+<p class="page-subtitle">{{ t("Ask in any supported language. Replies follow the Reply Language you choose below.") }}</p>
+
+<div class="panel" style="margin-bottom:14px;">
+    <label for="reply-language" style="font-weight:600; margin-right:10px;">{{ t("Reply Language") }}</label>
+    <select id="reply-language" class="input" style="max-width:260px; display:inline-block;" onchange="setReplyLanguage(this.value)">
+        {% for code, label in SUPPORTED_LANGUAGES.items() %}
+        <option value="{{ code }}" {% if reply_language == code %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+    </select>
+    <span class="muted" style="margin-left:10px;">{{ t("UI") }}: {{ current_language_name }} · {{ t("Replies") }}: {{ reply_language_name }}</span>
+</div>
 
 <div class="panel">
-    <h3 class="section-title">Built-in questions (tap to fill, then Send)</h3>
+    <h3 class="section-title">{{ t("Built-in questions (tap to fill, then Send)") }}</h3>
     <div style="display:flex; flex-wrap:wrap; gap:8px;">
         {% for q in suggested_questions %}
-        <button type="button" class="btn btn-secondary" style="font-size:12px;" data-suggest="{{ q|e }}">{{ q }}</button>
+        <button type="button" class="btn btn-secondary" style="font-size:12px;" data-suggest="{{ q|e }}">{{ t(q) }}</button>
         {% endfor %}
     </div>
 </div>
 
 <div class="panel">
-    <div class="chat-feed">
+    <div class="chat-feed" data-skip-translate="1">
         {% for msg in messages %}
         <div class="msg {{ msg['role'] }}">
-            <b>{{ "You" if msg["role"] == "user" else "AI Assistant" }}</b>
+            <b>{{ t("You") if msg["role"] == "user" else t("AI Assistant") }}</b>
             <div>{{ msg["message"] }}</div>
             <small>{{ msg["created_at"] }}</small>
         </div>
         {% endfor %}
     </div>
     <form method="post" style="display:flex; gap:8px; flex-wrap:wrap;">
-        <input id="assistant-input" class="input" name="message" placeholder="Ask about inventory, orders, finance, growth strategy..." required style="flex:1; min-width:200px;">
-        <button class="btn btn-primary" type="submit">Send</button>
+        <input type="hidden" name="reply_language" id="reply-language-hidden" value="{{ reply_language }}">
+        <input id="assistant-input" class="input" name="message" placeholder="{{ t('Ask about inventory, orders, finance, growth strategy...') }}" required style="flex:1; min-width:200px;">
+        <button class="btn btn-primary" type="submit">{{ t("Send") }}</button>
     </form>
     <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-        <button type="button" class="btn btn-secondary" onclick="startVoiceRecording()">🎤 Record voice</button>
-        <button type="button" class="btn btn-secondary" onclick="focusMessageInput()">Type instead</button>
-        <span id="voice-status" style="color:#4b5563; font-size:13px;">Record your voice, then tap Send to continue.</span>
+        <button type="button" class="btn btn-secondary" onclick="startVoiceRecording()">🎤 {{ t("Record voice") }}</button>
+        <button type="button" class="btn btn-secondary" onclick="focusMessageInput()">{{ t("Type instead") }}</button>
+        <span id="voice-status" style="color:#4b5563; font-size:13px;">{{ t("Record your voice, then tap Send to continue.") }}</span>
     </div>
     <form method="post" action="{{ url_for('assistant_reset') }}" style="margin-top:10px;" onsubmit="return confirm('Clear all chat messages?');">
-        <button class="btn btn-secondary" type="submit">Reset chat</button>
+        <button class="btn btn-secondary" type="submit">{{ t("Reset chat") }}</button>
     </form>
 </div>
- 
 
 <script>
-document.querySelectorAll("[data-suggest]").forEach(function(btn) {
-    btn.addEventListener("click", function() {
-        var input = document.querySelector('input[name="message"]');
-        if (input) input.value = btn.getAttribute("data-suggest");
-    });
-});
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const assistantStatus = document.createElement('div');
+assistantStatus.id = 'assistant-status';
+assistantStatus.style.marginTop = '12px';
+assistantStatus.style.fontSize = '13px';
+assistantStatus.style.color = '#475569';
+assistantStatus.innerText = {{ t("Voice and AI status updates appear here.")|tojson }};
 
-function updateVoiceStatus(message) {
+function getReplyLanguage() {
+    const select = document.getElementById('reply-language');
+    return (select && select.value) || document.getElementById('reply-language-hidden')?.value || window.CURRENT_LANGUAGE || 'en';
+}
+
+function updateVoiceStatus(message, isThinking = false) {
     const status = document.getElementById('voice-status');
     if (status) status.textContent = message;
+    if (assistantStatus) assistantStatus.textContent = message;
+    const thinking = document.getElementById('thinking-indicator');
+    if (thinking) thinking.style.display = isThinking ? 'inline-flex' : 'none';
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+    const panel = document.querySelector('.panel');
+    if (panel) panel.insertBefore(assistantStatus, panel.firstChild);
+    const thinking = document.createElement('span');
+    thinking.id = 'thinking-indicator';
+    thinking.className = 'typing-indicator';
+    thinking.style.display = 'none';
+    if (panel) panel.insertBefore(thinking, panel.firstChild);
+
+    const replySelect = document.getElementById('reply-language');
+    const replyHidden = document.getElementById('reply-language-hidden');
+    if (replySelect && replyHidden) {
+        replySelect.addEventListener('change', () => {
+            replyHidden.value = replySelect.value;
+            if (window.setReplyLanguage) window.setReplyLanguage(replySelect.value);
+        });
+    }
+
+    document.querySelectorAll('[data-suggest]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const input = document.getElementById('assistant-input');
+            if (input) input.value = button.getAttribute('data-suggest') || '';
+            focusMessageInput();
+        });
+    });
+
+    try {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('autostart') === '1') setTimeout(() => startVoiceRecording(), 300);
+    } catch (e) {}
+});
 
 function focusMessageInput() {
     const input = document.getElementById('assistant-input');
@@ -61,80 +112,142 @@ function focusMessageInput() {
     updateVoiceStatus('Type your message in the box above.');
 }
 
+function speakText(text, voiceLanguage) {
+    if (!window.speechSynthesis || !text) return;
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = voiceLanguage || window.VOICE_LANGUAGE || 'en-IN';
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.onstart = () => updateVoiceStatus('Speaking response...');
+    utterance.onend = () => updateVoiceStatus('Ready for your next question.');
+    window.speechSynthesis.speak(utterance);
+}
+
+function sendVoiceRequest(message) {
+    if (!message) {
+        updateVoiceStatus('No voice content detected. Please try again.');
+        return;
+    }
+    const replyLanguage = getReplyLanguage();
+    updateVoiceStatus('Gemma is thinking...', true);
+    fetch('/voice_assistant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: message, reply_language: replyLanguage }),
+    })
+    .then((response) => response.json())
+    .then((data) => {
+        if (data && data.reply) {
+            const input = document.getElementById('assistant-input');
+            if (input) input.value = data.reply;
+            updateVoiceStatus('Gemma responded. You can review or edit before sending.');
+            speakText(data.reply, data.voice_language || window.VOICE_LANGUAGE);
+        } else {
+            updateVoiceStatus('Voice request failed. Please type your question instead.');
+        }
+    })
+    .catch(() => updateVoiceStatus('Voice request failed. Please type your question instead.'));
+}
+
 function startVoiceRecording() {
     const secureContext = window.isSecureContext || window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-
     if (!secureContext) {
         updateVoiceStatus('Use localhost or HTTPS for voice input.');
         focusMessageInput();
         return;
     }
 
+    if (SpeechRecognition) {
+        try {
+            updateVoiceStatus('Listening... speak now.');
+            const recognition = new SpeechRecognition();
+            // Input language is intentionally independent from Reply Language.
+            // Browser speech recognition uses the user's browser locale; the
+            // server upload fallback probes all supported Indian locales.
+            recognition.lang = navigator.language || 'en-IN';
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+            recognition.onresult = function(event) {
+                const spoken = event.results[0][0].transcript;
+                if (spoken) {
+                    updateVoiceStatus({{ t("Heard:")|tojson }} + ' ' + spoken);
+                    sendVoiceRequest(spoken);
+                }
+            };
+            recognition.onerror = function(event) {
+                updateVoiceStatus({{ t("Voice recognition error:")|tojson }} + ' ' + (event.error || {{ t("Try again.")|tojson }}));
+            };
+            recognition.start();
+        } catch (error) {
+            updateVoiceStatus('Speech recognition is unavailable. Using microphone upload instead.');
+            startLegacyVoiceRecording();
+        }
+        return;
+    }
+    startLegacyVoiceRecording();
+}
+
+function startLegacyVoiceRecording() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         updateVoiceStatus('Microphone access is not available in this browser.');
         focusMessageInput();
         return;
     }
-
+    const replyLanguage = getReplyLanguage();
     updateVoiceStatus('Recording voice... speak now for up to 8 seconds.');
-
     navigator.mediaDevices.getUserMedia({ audio: true })
         .then(function(stream) {
             const chunks = [];
             const mediaRecorder = new MediaRecorder(stream);
-
             mediaRecorder.ondataavailable = function(event) {
-                if (event.data.size > 0) {
-                    chunks.push(event.data);
-                }
+                if (event.data.size > 0) chunks.push(event.data);
             };
-
             mediaRecorder.onstop = function() {
                 const blob = new Blob(chunks, { type: 'audio/webm' });
                 const reader = new FileReader();
                 reader.onloadend = function() {
                     const base64 = reader.result.split(',')[1];
+                    updateVoiceStatus('Sending recorded audio to Gemma...', true);
                     fetch('/voice_assistant', {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ audio: base64, language: navigator.language || 'en-US' })
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ audio: base64, reply_language: replyLanguage }),
                     })
-                    .then(function(response) { return response.json(); })
-                    .then(function(data) {
-                        const input = document.getElementById('assistant-input');
-                        if (input) {
-                            input.value = input.value || (data.message || '');
+                    .then((response) => response.json())
+                    .then((data) => {
+                        if (data && data.reply) {
+                            const input = document.getElementById('assistant-input');
+                            if (input) input.value = data.reply;
+                            updateVoiceStatus('Gemma replied. You can review or edit before sending.');
+                            speakText(data.reply, data.voice_language || window.VOICE_LANGUAGE);
+                        } else {
+                            updateVoiceStatus('Voice recording could not be processed. Please type your message instead.');
                         }
-                        updateVoiceStatus('Voice recorded. Please click Send to continue.');
                     })
-                    .catch(function() {
-                        updateVoiceStatus('Voice recording could not be processed. Please type your message instead.');
-                    });
+                    .catch(() => updateVoiceStatus('Voice recording could not be processed. Please type your message instead.'));
                 };
                 reader.readAsDataURL(blob);
                 stream.getTracks().forEach(function(track) { track.stop(); });
             };
-
             mediaRecorder.start();
             window.setTimeout(function() {
                 try { mediaRecorder.stop(); } catch (e) {}
             }, 8000);
         })
         .catch(function(error) {
-            updateVoiceStatus('Microphone permission was blocked: ' + (error.message || 'Please allow microphone access and try again.'));
+            updateVoiceStatus({{ t("Microphone permission was blocked:")|tojson }} + ' ' + (error.message || {{ t("Please allow microphone access and try again.")|tojson }}));
             focusMessageInput();
         });
 }
 </script>
 
 <div class="panel">
-    <h3 class="section-title">Business Context Used by AI</h3>
+    <h3 class="section-title">{{ t("Business Context Used by AI") }}</h3>
     <div class="cards">
-        <div class="card"><h3>Revenue</h3><div class="metric">{{ metrics.revenue|inr }}</div></div>
-        <div class="card"><h3>Net Profit</h3><div class="metric">{{ metrics.net_profit|inr }}</div></div>
-        <div class="card"><h3>Low Stock</h3><div class="metric">{{ metrics.low_stock }}</div></div>
-        <div class="card"><h3>VIP Customers</h3><div class="metric">{{ metrics.vip_customers }}</div></div>
+        <div class="card"><h3>{{ t("Revenue") }}</h3><div class="metric">{{ metrics.revenue|inr }}</div></div>
+        <div class="card"><h3>{{ t("Net Profit") }}</h3><div class="metric">{{ metrics.net_profit|inr }}</div></div>
+        <div class="card"><h3>{{ t("Low Stock") }}</h3><div class="metric">{{ metrics.low_stock }}</div></div>
+        <div class="card"><h3>{{ t("VIP Customers") }}</h3><div class="metric">{{ metrics.vip_customers }}</div></div>
     </div>
 </div>
 {% endblock %}
- 

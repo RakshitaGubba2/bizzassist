@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ session.get('language', 'en') }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ "Business Profile - BizAssist AI" if form_mode == "profile" else "Business Login - BizAssist AI" }}</title>
+    <title>{{ t("Business Profile - BizAssist AI") if form_mode == "profile" else t("Business Login - BizAssist AI") }}</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: "Segoe UI", sans-serif; }
         body {
@@ -68,38 +68,38 @@
 <body>
     <div class="card">
         <div class="header">
-            <h1>{{ "Business Profile" if form_mode == "profile" else "Business Onboarding / Login" }}</h1>
-            <p>Enter shop/business and financial details. Net profit and all graphs will calculate from this data.</p>
+            <h1>{{ t("Business Profile") if form_mode == "profile" else t("Business Onboarding / Login") }}</h1>
+            <p>{{ t("Enter shop/business and financial details. Net profit and all graphs will calculate from this data.") }}</p>
         </div>
         <div class="content">
             {% if location_error is defined and location_error %}
             <p class="hint" style="color:#b91c1c; margin-bottom:14px;">{{ location_error }}</p>
             {% endif %}
             <form method="post">
-                <div class="section-title">Personal & Business Details</div>
+                <div class="section-title">{{ t("Personal & Business Details") }}</div>
                 <div class="grid">
                     <div>
-                        <label>Owner Full Name</label>
+                        <label>{{ t("Owner Full Name") }}</label>
                         <input name="owner_name" {% if form_mode == "login" %}required{% endif %} value="{{ profile['owner_name'] if profile else '' }}">
                     </div>
                     <div>
-                        <label>Shop / Business Name</label>
+                        <label>{{ t("Shop / Business Name") }}</label>
                         <input name="business_name" {% if form_mode == "login" %}required{% endif %} value="{{ profile['business_name'] if profile else '' }}">
                     </div>
                     <div>
-                        <label>Email</label>
+                        <label>{{ t("Email") }}</label>
                         <input type="email" name="email" {% if form_mode == "login" %}required{% endif %} value="{{ profile['email'] if profile else '' }}">
                     </div>
                     <div>
-                        <label>Phone</label>
+                        <label>{{ t("Phone") }}</label>
                         <input name="phone" {% if form_mode == "login" %}required{% endif %} value="{{ profile['phone'] if profile else '' }}">
                     </div>
                     <div class="full">
-                        <label>Shop / business location (city / area — used for local offers)</label>
-                        <input name="location" {% if form_mode == "login" %}required{% endif %} placeholder="e.g. MG Road, Bengaluru" value="{% if profile %}{{ profile['location'] or '' }}{% endif %}">
+                        <label>{{ t("Shop / business location (city / area — used for local offers)") }}</label>
+                        <input name="location" {% if form_mode == "login" %}required{% endif %} placeholder="{{ t('e.g. MG Road, Bengaluru') }}" value="{% if profile %}{{ profile['location'] or '' }}{% endif %}">
                     </div>
                     <div class="full">
-                        <label>Shop / Business Type</label>
+                        <label>{{ t("Shop / Business Type") }}</label>
                         <select name="business_type" {% if form_mode == "login" %}required{% endif %}>
                             {% set selected_type = profile['business_type'] if profile else 'Retail' %}
                             {% for t in ['Retail', 'E-commerce', 'Service', 'Restaurant', 'Manufacturing', 'Other'] %}
@@ -108,60 +108,60 @@
                         </select>
                     </div>
                     <div>
-                        <label>Campaign sender Gmail</label>
-                        <input type="email" name="campaign_sender_email" value="{{ campaign_sender_email if campaign_sender_email is defined else '' }}" placeholder="yourname@gmail.com (optional)">
+                        <label>{{ t("Campaign sender Gmail") }}</label>
+                        <input type="email" name="campaign_sender_email" value="{{ campaign_sender_email if campaign_sender_email is defined else '' }}" placeholder="{{ t('yourname@gmail.com (optional)') }}">
                     </div>
                     <div>
-                        <label>Campaign sender App Password</label>
-                        <input type="password" name="campaign_sender_password" placeholder="16-character Gmail App Password (optional)">
+                        <label>{{ t("Campaign sender App Password") }}</label>
+                        <input type="password" name="campaign_sender_password" placeholder="{{ t('16-character Gmail App Password (optional)') }}">
                     </div>
                 </div>
 
-                <div class="section-title">Marketing / Financial Status</div>
+                <div class="section-title">{{ t("Marketing / Financial Status") }}</div>
                 <div class="grid">
                     <div>
-                        <label>Current Monthly Revenue (₹)</label>
+                        <label>{{ t("Current Monthly Revenue (₹)") }}</label>
                         <input type="number" step="0.01" name="monthly_revenue" {% if form_mode == "login" %}required{% endif %} value="{{ profile['monthly_revenue'] if profile else '' }}">
                     </div>
                     <div>
-                        <label>Current Monthly Expenses (₹)</label>
+                        <label>{{ t("Current Monthly Expenses (₹)") }}</label>
                         <input type="number" step="0.01" name="monthly_expenses" {% if form_mode == "login" %}required{% endif %} value="{{ profile['monthly_expenses'] if profile else '' }}">
                     </div>
                     <div>
-                        <label>Monthly Marketing Spend (₹)</label>
+                        <label>{{ t("Monthly Marketing Spend (₹)") }}</label>
                         <input type="number" step="0.01" name="marketing_spend" {% if form_mode == "login" %}required{% endif %} value="{{ profile['marketing_spend'] if profile else '' }}">
                     </div>
                     <div>
-                        <label>Growth Target (%)</label>
+                        <label>{{ t("Growth Target (%)") }}</label>
                         <input type="number" step="0.01" name="growth_target" {% if form_mode == "login" %}required{% endif %} value="{{ profile['growth_target'] if profile else '' }}">
                     </div>
                     <div>
-                        <label>Select Month for Extra Financial Entry</label>
+                        <label>{{ t("Select Month for Extra Financial Entry") }}</label>
                         <input type="month" name="financial_month" id="financial-month" value="{{ selected_financial_month if selected_financial_month is defined else '' }}">
                     </div>
                     <div>
-                        <label>Selected Month Revenue (₹)</label>
+                        <label>{{ t("Selected Month Revenue (₹)") }}</label>
                         <input type="number" step="0.01" name="selected_month_revenue" id="selected-month-revenue" value="{{ selected_month_revenue if selected_month_revenue is defined else '' }}">
                     </div>
                     <div>
-                        <label>Selected Month Expenses (₹)</label>
+                        <label>{{ t("Selected Month Expenses (₹)") }}</label>
                         <input type="number" step="0.01" name="selected_month_expenses" id="selected-month-expenses" value="{{ selected_month_expenses if selected_month_expenses is defined else '' }}">
                         <label class="check-row">
                             <input type="checkbox" name="financial_month_none" id="financial-month-none">
-                            Selected month record not available (None)
+                            {{ t("Selected month record not available (None)") }}
                         </label>
                     </div>
                 </div>
 
                 <div class="actions">
                     {% if form_mode == "profile" %}
-                    <button type="submit" name="action" value="stay">Save Profile</button>
-                    <button type="submit" name="action" value="dashboard" style="margin-left:8px;">Save and Go Dashboard</button>
+                    <button type="submit" name="action" value="stay">{{ t("Save Profile") }}</button>
+                    <button type="submit" name="action" value="dashboard" style="margin-left:8px;">{{ t("Save and Go Dashboard") }}</button>
                     {% else %}
-                    <button type="submit">Save and Continue</button>
+                    <button type="submit">{{ t("Save and Continue") }}</button>
                     {% endif %}
                 </div>
-                <p class="hint">You can edit these details later from the "Business Profile" menu in the sidebar.</p>
+                <p class="hint">{{ t('You can edit these details later from the "Business Profile" menu in the sidebar.') }}</p>
             </form>
         </div>
     </div>

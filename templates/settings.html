@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page">
+  <h1>Settings</h1>
+  
+  <div style="background:#f0f0f0; padding:16px; border-radius:4px; margin-bottom:20px;">
+    <h3 style="margin-top:0;">📋 NVIDIA NIM API Key Setup</h3>
+    <p><strong>Step 1:</strong> Open the <code>.env</code> file in your project root folder</p>
+    <p><strong>Step 2:</strong> Go to <a href="https://build.nvidia.com/" target="_blank">https://build.nvidia.com/</a> and log in</p>
+    <p><strong>Step 3:</strong> Find the <code>google/gemma-4-31b-it</code> model and click "Get API Key"</p>
+    <p><strong>Step 4:</strong> Copy the API key and paste it in the <code>.env</code> file:</p>
+    <code style="display:block; background:#fff; padding:12px; margin:12px 0; border-left:4px solid #007bff;">
+      NVIDIA_NIM_API_KEY=your_api_key_here
+    </code>
+    <p><strong>Step 5:</strong> Restart the application</p>
+  </div>
+
+  <h3>Current API Key Status</h3>
+  {% if api_key_loaded %}
+    <div class="panel" style="background:#d4edda; border-color:#c3e6cb; color:#155724;">
+      ✓ <strong>API Key Loaded</strong>
+      <p>Your NVIDIA NIM API key is configured. Model: <code>{{ model_name }}</code></p>
+      <button id="testKey" type="button" class="btn btn-secondary" style="margin-top:8px;">Test Connection</button>
+      <span id="testResult" class="muted" role="status"></span>
+    </div>
+  {% else %}
+    <div class="panel" style="background:#f8d7da; border-color:#f5c6cb; color:#721c24;">
+      ✗ <strong>API Key Not Found</strong>
+      <p>Please follow the setup steps above to configure your API key in the <code>.env</code> file.</p>
+    </div>
+  {% endif %}
+</div>
+
+<script>
+const testBtn = document.getElementById('testKey');
+if (testBtn) {
+  testBtn.addEventListener('click', async () => {
+    const out = document.getElementById('testResult');
+    out.textContent = 'Testing NVIDIA NIM connection...';
+    try {
+      const response = await fetch('/test_api', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({})});
+      const result = await response.json();
+      out.textContent = result.ok ? `✓ Connected (${result.model}, ${result.latency_ms}ms)` : `✗ ${result.message}`;
+    } catch (error) {
+      out.textContent = `✗ Network error: ${error.message}`;
+    }
+  });
+}
+</script>
+{% endblock %}

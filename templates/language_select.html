@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="{{ current_language or 'en' }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ t("Select Language - BizAssist AI") }}</title>
+    <style>
+        body { min-height: 100vh; margin: 0; font-family: "Segoe UI", sans-serif; background: linear-gradient(135deg, #1e3a8a, #2563eb); color: #f8fafc; display: grid; place-items: center; }
+        .language-shell { width: min(100%, 720px); padding: 32px; background: rgba(15, 23, 42, 0.95); border-radius: 24px; box-shadow: 0 24px 80px rgba(15,23,42,0.35); }
+        h1 { font-size: 2.6rem; margin-bottom: 12px; }
+        p { color: #cbd5e1; margin-bottom: 24px; line-height: 1.6; }
+        .language-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        button { width: 100%; background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.18); color: #f8fafc; border-radius: 14px; padding: 16px 18px; cursor: pointer; font-size: 1rem; font-weight: 700; transition: transform 0.2s ease, background 0.2s ease; }
+        button:hover { transform: translateY(-2px); background: rgba(255,255,255,0.18); }
+        .selected { background: #fff; color: #1e3a8a; border-color: #c7d2fe; }
+        .footer { margin-top: 18px; color: #cbd5e1; font-size: 0.95rem; }
+        @media (max-width: 620px) { .language-grid { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body data-current-language="{{ current_language or 'en' }}">
+    <div class="language-shell">
+        <h1>{{ t("Select your language") }}</h1>
+        <p>{{ t("Choose the language you want BizAssist AI to use across the whole app. After selection, every page opens already translated.") }}</p>
+        <div class="language-grid">
+            {% for code, label in languages.items() %}
+                <form method="post" style="margin:0;" class="language-form">
+                    <input type="hidden" name="language" value="{{ code }}">
+                    <button type="submit" class="{{ 'selected' if code == current_language else '' }}">{{ label }}</button>
+                </form>
+            {% endfor %}
+        </div>
+        <div class="footer">{{ t("You can switch language anytime using the blue floating button in the app.") }}</div>
+    </div>
+    <script>
+        document.querySelectorAll('.language-form').forEach((form) => {
+            form.addEventListener('submit', function () {
+                const language = form.querySelector('input[name="language"]').value;
+                try { localStorage.setItem('language', language); } catch (e) {}
+            });
+        });
+    </script>
+</body>
+</html>

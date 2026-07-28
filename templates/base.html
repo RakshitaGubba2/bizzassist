@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ session.get('language', 'en') }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -93,6 +93,64 @@
         .msg.user { background: #dbeafe; align-self: flex-end; }
         .msg.assistant { background: #f3f4f6; align-self: flex-start; }
         .msg small { display: block; margin-top: 6px; color: #6b7280; font-size: 11px; }
+        .floating-language-switcher {
+            position: fixed;
+            right: 24px;
+            bottom: 24px;
+            z-index: 30;
+            display: grid;
+            gap: 10px;
+            align-items: center;
+        }
+        .language-button {
+            border: none;
+            border-radius: 999px;
+            padding: 10px 16px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+        }
+        .language-panel {
+            display: none;
+            background: rgba(255,255,255,0.98);
+            border-radius: 18px;
+            padding: 14px;
+            min-width: 220px;
+            box-shadow: 0 24px 80px rgba(15, 23, 42, 0.16);
+        }
+        .language-panel.open { display: grid; }
+        .language-panel button {
+            background: transparent;
+            border: none;
+            text-align: left;
+            padding: 10px 0;
+            cursor: pointer;
+            color: #111827;
+            font-size: 14px;
+        }
+        .language-panel button:hover { color: #1d4ed8; }
+        .typing-indicator {
+            display: inline-flex;
+            gap: 4px;
+            align-items: center;
+            font-size: 13px;
+            color: #475569;
+        }
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #3b82f6;
+            animation: blink 1.2s infinite ease-in-out;
+        }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink {
+            0%, 80%, 100% { opacity: 0.2; transform: translateY(0); }
+            40% { opacity: 1; transform: translateY(-3px); }
+        }
         @media (max-width: 1100px) {
             .cards { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
             .row { grid-template-columns: 1fr; }
@@ -100,7 +158,7 @@
         }
     </style>
 </head>
-<body>
+<body data-current-language="{{ session.get('language', 'en') }}">
 <div class="app">
     <aside class="sidebar">
         <div class="logo">
@@ -112,38 +170,56 @@
         </div>
         <nav class="nav">
             {% if is_personal_account %}
-            <a href="/marketing" class="{{ 'active' if active_page == 'marketing' else '' }}">Local offers</a>
-            <a href="/business-profile" class="{{ 'active' if active_page == 'business_profile' else '' }}">My account</a>
+            <a href="/marketing" class="{{ 'active' if active_page == 'marketing' else '' }}">{{ t("Local offers") }}</a>
+            <a href="/business-profile" class="{{ 'active' if active_page == 'business_profile' else '' }}">{{ t("My account") }}</a>
             {% else %}
-            <a href="/dashboard" class="{{ 'active' if active_page == 'dashboard' else '' }}">Dashboard</a>
-            <a href="/inventory" class="{{ 'active' if active_page == 'inventory' else '' }}">Inventory</a>
-            <a href="/orders" class="{{ 'active' if active_page == 'orders' else '' }}">Orders</a>
-            <a href="/marketing" class="{{ 'active' if active_page == 'marketing' else '' }}">Marketing</a>
-            <a href="/finance" class="{{ 'active' if active_page == 'finance' else '' }}">Finance</a>
-            <a href="/customers" class="{{ 'active' if active_page == 'customers' else '' }}">Customers</a>
-            <a href="/assistant" class="{{ 'active' if active_page == 'assistant' else '' }}">AI Assistant</a>
-            <a href="/business-profile" class="{{ 'active' if active_page == 'business_profile' else '' }}">Business Profile</a>
+            <a href="/dashboard" class="{{ 'active' if active_page == 'dashboard' else '' }}">{{ t("Dashboard") }}</a>
+            <a href="/inventory" class="{{ 'active' if active_page == 'inventory' else '' }}">{{ t("Inventory") }}</a>
+            <a href="/orders" class="{{ 'active' if active_page == 'orders' else '' }}">{{ t("Orders") }}</a>
+            <a href="/marketing" class="{{ 'active' if active_page == 'marketing' else '' }}">{{ t("Marketing") }}</a>
+            <a href="/finance" class="{{ 'active' if active_page == 'finance' else '' }}">{{ t("Finance") }}</a>
+            <a href="/customers" class="{{ 'active' if active_page == 'customers' else '' }}">{{ t("Customers") }}</a>
+            <a href="/assistant" class="{{ 'active' if active_page == 'assistant' else '' }}">{{ t("AI Assistant") }}</a>
+            <a href="/business-profile" class="{{ 'active' if active_page == 'business_profile' else '' }}">{{ t("Business Profile") }}</a>
             {% endif %}
         </nav>
         <div class="promo">
-            <b>AI Powered</b>
-            <p>Your intelligent business companion for growth and efficiency.</p>
+            <b>{{ t("AI Powered") }}</b>
+            <p>{{ t("Your intelligent business companion for growth and efficiency.") }}</p>
         </div>
     </aside>
 
     <main class="content">
         <div class="topbar">
-            <span class="pill">AI Active</span>
+            <span class="pill">{{ t("AI Active") }}</span>
             <div>{{ business_name }}<br><span class="muted">{{ owner_name }}</span></div>
             <details class="user-menu">
-                <summary title="Account">{{ avatar_text }}</summary>
+                <summary title="{{ t('Account') }}">{{ avatar_text }}</summary>
                 <div class="user-dropdown">
-                    <a href="/logout">Log out</a>
+                    <a href="/settings">{{ t("Settings") }}</a>
+                    <a href="/logout">{{ t("Log out") }}</a>
                 </div>
             </details>
         </div>
         {% block content %}{% endblock %}
     </main>
 </div>
+<div class="floating-language-switcher">
+    <button class="language-button" type="button" onclick="toggleLanguageSwitcher()">
+        {{ t("Language:") }} {{ SUPPORTED_LANGUAGES.get(session.get('language', 'en'), 'English') }}
+    </button>
+    <div id="languagePanel" class="language-panel" aria-hidden="true"></div>
+</div>
+<div style="position:fixed; left:24px; bottom:24px; z-index:30;">
+    <a href="/assistant?autostart=1" title="{{ t('Quick AI mic') }}" style="display:inline-block; text-decoration:none;">
+        <button class="language-button" style="background:#fff; color:#111827; border:1px solid #e5e7eb;">🎤 {{ t("AI Mic") }}</button>
+    </a>
+</div>
+<script>
+    window.CURRENT_LANGUAGE = "{{ session.get('language', 'en') }}";
+    window.SUPPORTED_LANGUAGES = {{ SUPPORTED_LANGUAGES | tojson }};
+    window.VOICE_LANGUAGE = "{{ voice_language }}";
+</script>
+<script data-ui-translation-client src="{{ url_for('static', filename='js/translate.js') }}"></script>
 </body>
 </html>

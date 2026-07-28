@@ -6,97 +6,344 @@ import os
 import re
 import sqlite3
 import smtplib
-from flask import Flask, redirect, render_template, request, session, url_for, jsonify
+import threading
+from flask import Flask, g, has_request_context, redirect, render_template as flask_render_template, request, session, url_for, jsonify
+from dotenv import load_dotenv
 
-try:
-    from google import genai
-except ImportError:
-    genai = None
+# Load environment variables from .env file BEFORE app initialization
+load_dotenv()
+
+from services.config import load_flask_config
+from services.language_manager import (
+    SUPPORTED_LANGUAGES,
+    detect_language_from_text,
+    normalize_language_code,
+    speech_language,
+)
+from services.app_services import get_gemma, get_translation, init_services
+from services.i18n import current_reply_language, t
+from services.speech_service import transcribe_audio_bytes
+from services.assistant_service import (
+    build_ai_context as assistant_build_ai_context,
+    extract_action,
+    perform_business_action,
+    run_gemma_prompt,
+    assistant_reset_welcome,
+    localized_fallback_response,
+)
+import logging
+
+# configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-bizassist-secret-change-me")
-app.config["GEMINI_API_KEY"] = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMMA_API_KEY", "")
-app.config["GEMINI_MODEL"] = os.environ.get("GEMMA_MODEL") or os.environ.get("GEMINI_MODEL", "gemma-3-4b-it")
+app.config.update(load_flask_config())
+init_services(app)
 
-def ai_extract_command(text):
-    prompt = f"""
-    You are a smart business assistant.
 
-    Extract intent and data from user input.
+def render_template(template_name, **context):
+    """Render with the selected language before Flask sends the response.
 
-    Supported intents:
-    - add_customer
-    - update_customer
-    - add_order
-    - add_expense
-
-    Return JSON ONLY:
-    {{
-        "intent": "",
-        "name": "",
-        "email": "",
-        "phone": "",
-        "segment": "",
-        "items": 0,
-        "amount": 0
-    }}
-
-    Input: {text}
+    The lookup is SQLite-only and therefore has predictable sub-millisecond
+    behaviour once the translation catalogue has been prepared.  This replaces
+    the old after-request live Gemma translation pipeline.
     """
+    html = flask_render_template(template_name, **context)
+    if not has_request_context():
+        return html
+    if template_name == "assistant.html":
+        return html
+    language = normalize_language_code(session.get("language", "en"))
+    return get_translation().translate_html_cached(html, language)
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
+
+def _prewarm_language_async(language):
+    def worker():
+        try:
+            with app.app_context():
+                get_translation().prewarm_language(language)
+        except Exception:
+            logger.exception("Background language prewarm failed for %s", language)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _prewarm_assistant_catalog_async(language):
+    def worker():
+        try:
+            with app.app_context():
+                if normalize_language_code(language) == "en":
+                    return
+                get_translation().translate_texts(ASSISTANT_SUGGESTED_QUESTIONS, language, batch_size=1)
+        except Exception:
+            logger.exception("Background assistant warmup failed for %s", language)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _ensure_assistant_catalog(language):
+    _prewarm_assistant_catalog_async(language)
+
+
+class RequestConnection:
+    """A request-owned SQLite connection whose early close calls are harmless.
+
+    Existing routes explicitly call ``close()`` in many branches. Keeping the
+    physical connection open until Flask teardown lets helpers share exactly one
+    connection per request without changing route/business behaviour.
+    """
+    def __init__(self, connection):
+        self._connection = connection
+
+    def close(self):
+        logger.debug("SQLite close deferred until request teardown")
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+def _open_db_connection():
+    connection = sqlite3.connect(
+        app.config["DATABASE_PATH"],
+        timeout=app.config["SQLITE_TIMEOUT_SECONDS"],
     )
+    connection.row_factory = sqlite3.Row
+    # WAL allows readers while another request is writing; busy_timeout lets a
+    # short competing write wait rather than immediately failing as locked.
+    connection.execute("PRAGMA journal_mode=WAL").close()
+    connection.execute("PRAGMA foreign_keys=ON").close()
+    connection.execute("PRAGMA busy_timeout = 30000").close()
+    return connection
 
-    return json.loads(response.choices[0].message.content)
+
+@app.teardown_appcontext
+def close_request_db_connection(_exception=None):
+    connection = g.pop("_sqlite_connection", None)
+    if connection is not None:
+        connection.close()
+
+@app.before_request
+def ensure_language_selected():
+    if request.endpoint in (
+        "static",
+        "select_language",
+        "set_language",
+        "translate_batch",
+        "prewarm_language_route",
+    ):
+        return
+    if session.get("language") is None:
+        cookie_lang = request.cookies.get("language")
+        if cookie_lang:
+            session["language"] = normalize_language_code(cookie_lang)
+            session.setdefault("reply_language", session["language"])
+        else:
+            return redirect(url_for("select_language"))
+    session.setdefault("reply_language", session.get("language", app.config["LANGUAGE_DEFAULT"]))
+
+
+@app.context_processor
+def inject_template_context():
+    """Inject variables needed by all templates for translation."""
+    ui_language = session.get("language", app.config["LANGUAGE_DEFAULT"])
+    reply_language = session.get("reply_language", ui_language)
+    return {
+        "SUPPORTED_LANGUAGES": SUPPORTED_LANGUAGES,
+        "voice_language": speech_language(reply_language),
+        "reply_language": reply_language,
+        "t": t,
+        "_": t,
+    }
+
+
+@app.after_request
+def persist_language(response):
+    """Persist preference only; pages are localized during rendering."""
+    language = session.get("language")
+    if language:
+        response.set_cookie("language", language, max_age=365 * 24 * 3600, samesite="Lax")
+
+    return response
 
 @app.route("/voice_assistant", methods=["POST"])
 def voice_assistant():
-    conn = get_db_connection()
-    data = request.get_json(silent=True) or {}
-    user_message = str(data.get("message", "") or "").strip()
-    audio_b64 = str(data.get("audio", "") or "").strip()
-    language = normalize_language_code(data.get("language") or request.headers.get("Accept-Language") or "")
-    if not language or language == "auto":
-        language = resolve_user_language(user_message, request)
+    try:
+        data = request.get_json(silent=True) or {}
+        user_message = str(data.get("message", "") or "").strip()
+        audio_b64 = str(data.get("audio", "") or "").strip()
+        reply_language = normalize_language_code(
+            data.get("reply_language") or session.get("reply_language") or session.get("language") or "en"
+        )
 
-    if audio_b64:
+        logger.info("Voice assistant request: reply_language=%s, has_audio=%s", reply_language, bool(audio_b64))
+        if audio_b64:
+            try:
+                audio_bytes = base64.b64decode(audio_b64)
+                transcribed = transcribe_audio_bytes(audio_bytes, language=None)
+                user_message = transcribed or user_message
+                logger.info("Voice recognition result: %s", user_message)
+            except Exception:
+                user_message = ""
+
+        if not user_message:
+            return jsonify({
+                "reply": localized_fallback_response(reply_language),
+                "language": reply_language,
+                "voice_language": speech_language(reply_language),
+            })
+
+        conn = get_db_connection()
         try:
-            audio_bytes = base64.b64decode(audio_b64)
-            user_message = transcribe_audio_bytes(audio_bytes, language)
-        except Exception:
-            user_message = ""
+            context = assistant_build_ai_context(conn)
+            action_data = extract_action(user_message)
+            if action_data.get("action") != "none":
+                context["requested_action"] = action_data
+        finally:
+            conn.close()
 
-    if not user_message:
-        conn.close()
-        return jsonify({"reply": localized_fallback_response(language), "language": language, "voice_language": speech_language(language)})
+        response_text = None
+        try:
+            gemma = get_gemma()
+            logger.info("Gemma status before generation: ready=%s model=%s", gemma.is_ready(), gemma.model_name)
+            response_text = run_gemma_prompt(user_message, reply_language, context)
+            logger.info("Gemma response: %s", (response_text or "")[:200])
+        except Exception as exc:
+            logger.exception("Assistant failed")
+            response_text = localized_fallback_response(reply_language) + f" ({exc})"
 
-    now = datetime.now().isoformat(timespec="seconds")
+        conn = get_db_connection()
+        try:
+            action_summary = ""
+            if action_data.get("action") != "none":
+                action_summary = perform_business_action(conn, action_data)
+            final_response = response_text or action_summary or localized_fallback_response(reply_language)
+            now = datetime.now().isoformat(timespec="seconds")
+            conn.execute(
+                "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
+                ("user", user_message, now),
+            )
+            conn.execute(
+                "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
+                ("assistant", final_response, now),
+            )
+            conn.commit()
+            logger.info(
+                "Voice assistant messages saved: user_msg_len=%d response_len=%d",
+                len(user_message),
+                len(final_response),
+            )
+        finally:
+            conn.close()
 
-    conn.execute(
-        "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
-        ("user", user_message, now),
-    )
-
-    response = localized_fallback_response(language)
-    if user_message:
-        response = build_assistant_response(conn, user_message, language)
-
-    conn.execute(
-        "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
-        ("assistant", response, now),
-    )
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({
-        "reply": response,
-        "language": language,
-        "voice_language": speech_language(language),
-    })
+        return jsonify({
+            "reply": final_response,
+            "language": reply_language,
+            "voice_language": speech_language(reply_language),
+        })
+    except Exception as exc:
+        logger.exception("Voice assistant unhandled error: %s", exc)
+        return jsonify({"error": str(exc), "reply": localized_fallback_response(session.get("reply_language", "en"))}), 500
 DEFAULT_CAMPAIGN_RECIPIENTS = ()
+
+
+@app.route("/select-language", methods=["GET", "POST"])
+def select_language():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        language = normalize_language_code(request.form.get("language") or payload.get("language") or "")
+        session["language"] = language
+        session["reply_language"] = language
+        _prewarm_language_async(language)
+        _prewarm_assistant_catalog_async(language)
+        if request.is_json:
+            return jsonify({"status": "ok", "language": language})
+        return redirect(url_for("login"))
+
+    return render_template(
+        "language_select.html",
+        languages=SUPPORTED_LANGUAGES,
+        current_language=session.get("language", app.config["LANGUAGE_DEFAULT"]),
+    )
+
+
+@app.route("/set-language", methods=["POST"])
+def set_language():
+    language = normalize_language_code(request.form.get("language") or (request.get_json(silent=True) or {}).get("language") or "")
+    session["language"] = language
+    session["reply_language"] = language
+    _prewarm_language_async(language)
+    _prewarm_assistant_catalog_async(language)
+    if request.is_json:
+        return jsonify({"status": "ok", "language": language})
+    return redirect(request.referrer or url_for("root"))
+
+
+@app.route("/set-reply-language", methods=["POST"])
+def set_reply_language():
+    payload = request.get_json(silent=True) or {}
+    reply_language = normalize_language_code(
+        request.form.get("reply_language") or payload.get("reply_language") or session.get("language") or "en"
+    )
+    session["reply_language"] = reply_language
+    if request.is_json:
+        return jsonify({"status": "ok", "reply_language": reply_language})
+    return redirect(request.referrer or url_for("assistant"))
+
+
+@app.route("/prewarm-language", methods=["POST"])
+def prewarm_language_route():
+    """Report cache coverage; browser requests may never start AI translation."""
+    language = normalize_language_code(session.get("language", "en"))
+    from services.ui_catalog import all_ui_strings
+    cached = get_translation().cached_texts(all_ui_strings(), language)
+    result = {
+        "language": language,
+        "cached": sum(value != key for key, value in cached.items()) if language != "en" else len(cached),
+        "total": len(cached),
+    }
+    return jsonify({"status": "ok", **result})
+
+
+@app.route('/settings', methods=['GET', 'POST'])
+def settings():
+    api_key_loaded = bool(app.config.get("NVIDIA_NIM_API_KEY", "").strip())
+    model_name = app.config.get("NVIDIA_NIM_MODEL", "google/gemma-4-31b-it")
+    logger.info('Settings page accessed: api_key_loaded=%s model=%s', api_key_loaded, model_name)
+    return render_template(
+        'settings.html',
+        api_key_loaded=api_key_loaded,
+        model_name=model_name
+    )
+
+
+@app.route('/test_api', methods=['POST'])
+def test_api():
+    """Test the currently configured NVIDIA NIM API key (from .env file)."""
+    if not app.config["NVIDIA_NIM_API_KEY"]:
+        return jsonify({'ok': False, 'message': 'No API key configured. Please set NVIDIA_NIM_API_KEY in .env file'})
+    gem = get_gemma()
+    ok, latency, model, msg = gem.test_connection()
+    logger.info('API test: ok=%s latency_ms=%s model=%s message=%s', ok, latency, model, msg)
+    return jsonify({'ok': ok, 'latency_ms': latency, 'model': model, 'message': msg})
+
+
+@app.route("/translate_batch", methods=["POST"])
+def translate_batch():
+    payload = request.get_json(silent=True) or {}
+    texts = payload.get("texts", []) if isinstance(payload.get("texts", []), list) else []
+    texts = texts[:300]
+    language = session.get("language", app.config["LANGUAGE_DEFAULT"])
+    logger.info('Translation request received: language=%s, strings=%d', language, len(texts))
+    try:
+        # Kept for backwards-compatible clients, but it is intentionally
+        # cache-only.  Rendering and AJAX must not spend seconds calling NIM.
+        translations = get_translation().cached_texts(texts, language)
+        return jsonify({"translations": translations, "language": language})
+    except Exception as exc:
+        logger.exception('Translation request failed: language=%s, error=%s', language, exc)
+        return jsonify({"translations": {text: text for text in texts}, "language": language, "error": str(exc)}), 500
 
 
 def is_valid_email(email):
@@ -153,9 +400,13 @@ def send_campaign_emails(campaign, recipients, sender_email, sender_password):
     return sent_count
 
 def get_db_connection():
-    conn = sqlite3.connect("database.db")
-    conn.row_factory = sqlite3.Row
-    return conn
+    if not has_request_context():
+        return _open_db_connection()
+    if "_sqlite_connection" not in g:
+        g._sqlite_connection = _open_db_connection()
+    if "_sqlite_connection_proxy" not in g:
+        g._sqlite_connection_proxy = RequestConnection(g._sqlite_connection)
+    return g._sqlite_connection_proxy
 
 
 def format_inr(value):
@@ -185,24 +436,28 @@ app.jinja_env.filters["inr"] = format_inr
 
 
 def init_db():
+    # When init_db is called at module load time, it's outside a request context.
+    # We need to open a raw connection and ensure it's properly closed.
+    is_request_context = has_request_context()
     conn = get_db_connection()
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS inventory_products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            sku TEXT NOT NULL,
-            category TEXT NOT NULL,
-            stock INTEGER NOT NULL DEFAULT 0,
-            reorder_level INTEGER NOT NULL DEFAULT 0,
-            price REAL NOT NULL DEFAULT 0,
-            last_restocked TEXT NOT NULL
-        );
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS inventory_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                sku TEXT NOT NULL,
+                category TEXT NOT NULL,
+                stock INTEGER NOT NULL DEFAULT 0,
+                reorder_level INTEGER NOT NULL DEFAULT 0,
+                price REAL NOT NULL DEFAULT 0,
+                last_restocked TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS customers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS customers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
             phone TEXT NOT NULL,
             segment TEXT NOT NULL,
             total_orders INTEGER NOT NULL DEFAULT 0,
@@ -281,45 +536,54 @@ def init_db():
             source TEXT NOT NULL DEFAULT 'manual'
         );
         """
-    )
-    # Lightweight migration for existing databases.
-    try:
-        conn.execute(
-            "ALTER TABLE inventory_products ADD COLUMN last_restock_amount INTEGER NOT NULL DEFAULT 0"
         )
-    except sqlite3.OperationalError:
-        pass
-    for stmt in (
-        "ALTER TABLE business_profile ADD COLUMN account_type TEXT NOT NULL DEFAULT 'business'",
-        "ALTER TABLE business_profile ADD COLUMN location TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE business_profile ADD COLUMN campaign_sender_email TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE business_profile ADD COLUMN campaign_sender_password TEXT NOT NULL DEFAULT ''",
-    ):
+        # Lightweight migration for existing databases.
         try:
-            conn.execute(stmt)
+            conn.execute(
+                "ALTER TABLE inventory_products ADD COLUMN last_restock_amount INTEGER NOT NULL DEFAULT 0"
+            )
         except sqlite3.OperationalError:
             pass
-    try:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS shop_discounts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                product_name TEXT NOT NULL,
-                discount_percent REAL NOT NULL,
-                shop_location TEXT NOT NULL,
-                shop_name TEXT,
-                created_at TEXT NOT NULL
-            );
-            """
-        )
-    except sqlite3.OperationalError:
-        pass
-    conn.commit()
-    seed_demo_data(conn)
-    ensure_required_customers(conn)
-    conn.close()
-
-
+        for stmt in (
+            "ALTER TABLE business_profile ADD COLUMN account_type TEXT NOT NULL DEFAULT 'business'",
+            "ALTER TABLE business_profile ADD COLUMN location TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE business_profile ADD COLUMN campaign_sender_email TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE business_profile ADD COLUMN campaign_sender_password TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS shop_discounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_name TEXT NOT NULL,
+                    discount_percent REAL NOT NULL,
+                    shop_location TEXT NOT NULL,
+                    shop_name TEXT,
+                    created_at TEXT NOT NULL
+                );
+                """
+            )
+        except sqlite3.OperationalError:
+            pass
+        conn.commit()
+        seed_demo_data(conn)
+        ensure_required_customers(conn)
+    finally:
+        # Close the connection. If in a request context, RequestConnection.close()
+        # defers to teardown. If not in a request context (module load), actually close.
+        conn.close()
+        if not is_request_context and hasattr(conn, '_connection'):
+            # conn is a RequestConnection proxy and we're not in a request context
+            # We need to actually close the underlying connection
+            try:
+                conn._connection.close()
+                logger.info('Database initialized and closed successfully')
+            except Exception as exc:
+                logger.exception('Error closing database connection: %s', exc)
 def seed_demo_data(conn):
     counts = {
         "inventory": conn.execute("SELECT COUNT(*) FROM inventory_products").fetchone()[0],
@@ -719,9 +983,9 @@ CANNED_ASSISTANT_RESPONSES = {
         "Messages are stored in the assistant_messages table; a reset endpoint can clear them if enabled. "
         "Otherwise ask short new questions—the page shows the latest conversation window."
     ),
-    normalize_assistant_question("What is Gemini?"): (
-        "Gemini is Google's generative AI. If GEMINI_API_KEY or GOOGLE_API_KEY is set and google-generativeai "
-        "is installed, this assistant answers via Gemini; otherwise you see setup instructions."
+    normalize_assistant_question("What is the AI assistant?"): (
+        "The AI assistant uses NVIDIA NIM with Gemma to answer business questions using your store data. "
+        "Add an NVIDIA_NIM_API_KEY in Settings to enable AI responses."
     ),
     normalize_assistant_question("How do I improve profit?"): (
         "Raise revenue (orders), control expenses and marketing spend, manage inventory to avoid stockouts, "
@@ -774,7 +1038,7 @@ ASSISTANT_SUGGESTED_QUESTIONS = [
     "Can I use this on mobile?",
     "What currency is displayed?",
     "How do I clear the AI chat history?",
-    "What is Gemini?",
+    "What is the AI assistant?",
     "How do I improve profit?",
     "What is a VIP customer?",
     "How do discounts sync to personal accounts?",
@@ -861,240 +1125,6 @@ def build_ai_context(conn):
     }
 
 
-def _gemini_api_key():
-    return (
-        (app.config.get("GEMINI_API_KEY") or "").strip()
-        or (os.environ.get("GEMINI_API_KEY") or "").strip()
-        or (os.environ.get("GOOGLE_API_KEY") or "").strip()
-        or (os.environ.get("GEMMA_API_KEY") or "").strip()
-    )
-
-
-def normalize_language_code(language):
-    if not language:
-        return "en"
-    code = str(language).strip().lower().replace("_", "-")
-    if code.startswith("en"):
-        return "en"
-    if code.startswith("hi"):
-        return "hi"
-    if code.startswith("es"):
-        return "es"
-    if code.startswith("fr"):
-        return "fr"
-    if code.startswith("de"):
-        return "de"
-    if code.startswith("ar"):
-        return "ar"
-    if code.startswith("pt"):
-        return "pt"
-    if code.startswith("it"):
-        return "it"
-    if code.startswith("ja"):
-        return "ja"
-    if code.startswith("zh"):
-        return "zh"
-    if code.startswith("ko"):
-        return "ko"
-    if code.startswith("te"):
-        return "te"
-    if code.startswith("ta"):
-        return "ta"
-    return "en"
-
-
-def detect_language(text, fallback="en"):
-    if text is None:
-        return fallback
-    s = str(text).lower()
-    if any("\u0600" <= ch <= "\u06FF" for ch in s):
-        return "ar"
-    if any("\u0900" <= ch <= "\u097F" for ch in s):
-        return "hi"
-    if any("\u0B00" <= ch <= "\u0C7F" for ch in s):
-        return "te"
-    if any("\u0B80" <= ch <= "\u0BFF" for ch in s):
-        return "ta"
-    if any("\u4E00" <= ch <= "\u9FFF" for ch in s):
-        return "zh"
-    if any("\u3040" <= ch <= "\u30FF" for ch in s):
-        return "ja"
-
-    spanish_markers = ["hola", "gracias", "necesito", "como", "por favor", "pedido", "cliente", "inventario", "finanzas"]
-    french_markers = ["bonjour", "merci", "besoin", "comment", "s'il vous plaît", "commande", "client", "inventaire", "finance"]
-    german_markers = ["hallo", "bitte", "wie", "kann", "hilfe", "bestand", "bestellung", "kunde", "finanzen"]
-    arabic_markers = ["مرحبا", "شكرا", "كيف", "مساعدة", "الطلب", "العميل", "المخزون", "المالية"]
-    if any(marker in s for marker in spanish_markers):
-        return "es"
-    if any(marker in s for marker in french_markers):
-        return "fr"
-    if any(marker in s for marker in german_markers):
-        return "de"
-    if any(marker in s for marker in arabic_markers):
-        return "ar"
-    return fallback
-
-
-def resolve_user_language(text, request_obj=None):
-    requested = ""
-    if request_obj is not None:
-        requested = (request_obj.form.get("language") or request_obj.headers.get("Accept-Language") or "").strip()
-    if requested:
-        return normalize_language_code(requested)
-    return detect_language(text)
-
-
-def speech_language(language):
-    return {
-        "en": "en-US",
-        "hi": "hi-IN",
-        "es": "es-ES",
-        "fr": "fr-FR",
-        "de": "de-DE",
-        "ar": "ar-SA",
-        "pt": "pt-PT",
-        "it": "it-IT",
-        "ja": "ja-JP",
-        "zh": "zh-CN",
-        "ko": "ko-KR",
-        "te": "te-IN",
-        "ta": "ta-IN",
-    }.get(normalize_language_code(language), "en-US")
-
-
-def transcribe_audio_bytes(audio_bytes, language="en"):
-    if not audio_bytes:
-        return ""
-
-    try:
-        import speech_recognition as sr
-    except ImportError:
-        return ""
-
-    try:
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = tmp.name
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(tmp_path) as source:
-            audio_data = recognizer.record(source)
-        text = recognizer.recognize_google(audio_data, language=language)
-        os.unlink(tmp_path)
-        return text.strip()
-    except Exception:
-        return ""
-
-
-def translate_to_language(text, language):
-    language = normalize_language_code(language)
-    if language == "en":
-        return text
-    if language == "hi":
-        return text
-    if language == "es":
-        return text
-    if language == "fr":
-        return text
-    if language == "de":
-        return text
-    if language == "ar":
-        return text
-    return text
-
-
-def localized_fallback_response(language):
-    language = normalize_language_code(language)
-    fallbacks = {
-        "en": "I can help with your business questions. Ask about inventory, orders, finance, or marketing.",
-        "hi": "मैं आपके बिज़नेस सवालों में मदद कर सकता हूँ। स्टॉक, ऑर्डर, वित्त या मार्केटिंग के बारे में पूछें।",
-        "es": "Puedo ayudar con sus preguntas de negocio. Pregunte por inventario, pedidos, finanzas o marketing.",
-        "fr": "Je peux vous aider avec vos questions commerciales. Demandez à propos de l'inventaire, des commandes, des finances ou du marketing.",
-        "de": "Ich kann Ihnen bei Ihren Geschäftsfragen helfen. Fragen Sie nach Lagerbestand, Bestellungen, Finanzen oder Marketing.",
-        "ar": "أستطيع مساعدتك في أسئلة العمل. اسأل عن المخزون أو الطلبات أو التمويل أو التسويق.",
-        "pt": "Posso ajudar com suas perguntas de negócios. Pergunte sobre estoque, pedidos, finanças ou marketing.",
-        "it": "Posso aiutarti con le tue domande aziendali. Chiedi di inventario, ordini, finanza o marketing.",
-        "ja": "ビジネスの質問にお手伝いできます。在庫、注文、財務、マーケティングについて聞いてください。",
-        "zh": "我可以帮助您解答业务问题。可以询问库存、订单、财务或营销相关内容。",
-        "ko": "비즈니스 질문을 도와드릴 수 있습니다. 재고, 주문, 재무 또는 마케팅에 대해 물어보세요.",
-        "te": "మీ వ్యాపార ప్రశ్నలకు నేను సహాయం చేయగలను. స్టాక్, ఆర్డర్లు, ఫైనాన్స్ లేదా మార్కెటింగ్ గురించి అడగండి.",
-        "ta": "உங்கள் வணிக கேள்விகளுக்கு நான் உதவ முடியும். இருப்பு, ஆர்டர்கள், நிதி அல்லது மார்க்கெட்டிங் பற்றி கேளுங்கள்.",
-    }
-    return fallbacks.get(language, fallbacks["en"])
-
-
-def call_gemini(conn, user_message, language="en"):
-    """All assistant replies go through Google Gemini/Gemma when an API key is set."""
-    api_key = _gemini_api_key()
-    if not api_key:
-        return None
-
-    try:
-        import google.generativeai as generative_ai
-    except ImportError:
-        return None
-
-    try:
-        generative_ai.configure(api_key=api_key)
-        model_name = (app.config.get("GEMMA_MODEL") or app.config.get("GEMINI_MODEL") or "gemma-3-4b-it").strip()
-        context = build_ai_context(conn)
-        language_name = {
-            "en": "English",
-            "hi": "Hindi",
-            "es": "Spanish",
-            "fr": "French",
-            "de": "German",
-            "ar": "Arabic",
-            "pt": "Portuguese",
-            "it": "Italian",
-            "ja": "Japanese",
-            "zh": "Chinese",
-            "ko": "Korean",
-            "te": "Telugu",
-            "ta": "Tamil",
-        }.get(normalize_language_code(language), "English")
-        prompt = (
-            "You are a friendly business assistant for BizAssist AI. "
-            f"Reply in {language_name} using natural, conversational language. "
-            "Do not answer in English if the user wrote in another language. "
-            "If the question is about this business, use the business context below; "
-            "otherwise give a short, practical business answer.\n\n"
-            f"Business context (JSON):\n{json.dumps(context, default=str)}\n\n"
-            f"User question:\n{user_message}"
-        )
-        model = generative_ai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
-        try:
-            text = (response.text or "").strip()
-        except ValueError:
-            text = ""
-        if text:
-            return text
-        return (
-            "Gemma returned no text (it may have been blocked for safety). "
-            "Try rephrasing your question."
-        )
-    except Exception as exc:
-        return f"Gemma error: {exc!s}. Check GEMMA_MODEL or GEMINI_MODEL and your API key."
-
-
-def build_assistant_response(conn, user_message, language="en"):
-    nq = normalize_assistant_question(user_message)
-    if nq and nq in CANNED_ASSISTANT_RESPONSES:
-        return translate_to_language(CANNED_ASSISTANT_RESPONSES[nq], language)
-    reply = call_gemini(conn, user_message, language)
-    if reply is not None:
-        return translate_to_language(reply, language)
-    return localized_fallback_response(language)
-
-
-def assistant_reset_welcome():
-    return (
-        "Hello! I can answer the 30 built-in questions without any API key. "
-        "For other topics, add a Gemini API key in settings or environment."
-    )
-
-
 def get_business_profile(conn):
     return conn.execute("SELECT * FROM business_profile WHERE id = 1").fetchone()
 
@@ -1160,11 +1190,19 @@ def inject_business_profile():
         business_name = "Demo Business"
         avatar = "DB"
         is_personal_account = False
+    language_code = session.get("language", app.config["LANGUAGE_DEFAULT"])
+    reply_language_code = session.get("reply_language", language_code)
     return {
         "owner_name": owner_name,
         "business_name": business_name,
         "avatar_text": avatar,
         "is_personal_account": is_personal_account,
+        "SUPPORTED_LANGUAGES": SUPPORTED_LANGUAGES,
+        "current_language": language_code,
+        "current_language_name": SUPPORTED_LANGUAGES.get(language_code, "English"),
+        "reply_language": reply_language_code,
+        "reply_language_name": SUPPORTED_LANGUAGES.get(reply_language_code, "English"),
+        "voice_language": speech_language(reply_language_code),
     }
 
 
@@ -2009,7 +2047,7 @@ def assistant_reset():
     now = datetime.now().isoformat(timespec="seconds")
     conn.execute(
         "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
-        ("assistant", assistant_reset_welcome(), now),
+                ("assistant", assistant_reset_welcome(current_reply_language()), now),
     )
     conn.commit()
     conn.close()
@@ -2023,36 +2061,93 @@ def assistant():
     redir = require_business_user()
     if redir:
         return redir
-    conn = get_db_connection()
-    if request.method == "POST":
-        user_message = request.form.get("message", "").strip()
-        if user_message:
-            language = resolve_user_language(user_message, request)
-            now = datetime.now().isoformat(timespec="seconds")
-            conn.execute(
-                "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
-                ("user", user_message, now),
-            )
-            response = build_assistant_response(conn, user_message, language)
-            conn.execute(
-                "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
-                ("assistant", response, now),
-            )
-            conn.commit()
-        return redirect(url_for("assistant"))
 
-    messages = conn.execute(
-        "SELECT * FROM assistant_messages ORDER BY id ASC LIMIT 30"
-    ).fetchall()
-    metrics = query_metrics(conn)
-    conn.close()
-    return render_template(
-        "assistant.html",
-        active_page="assistant",
-        messages=messages,
-        metrics=metrics,
-        suggested_questions=ASSISTANT_SUGGESTED_QUESTIONS,
-    )
+    try:
+        if request.method == "POST":
+            user_message = request.form.get("message", "").strip()
+            if user_message:
+                reply_language = normalize_language_code(
+                    request.form.get("reply_language") or session.get("reply_language") or session.get("language") or "en"
+                )
+                session["reply_language"] = reply_language
+                logger.info(
+                    "Assistant POST: ui_language=%s reply_language=%s message_len=%d",
+                    session.get("language"),
+                    reply_language,
+                    len(user_message),
+                )
+
+                conn = get_db_connection()
+                try:
+                    context = assistant_build_ai_context(conn)
+                    action_data = extract_action(user_message)
+                    if action_data.get("action") != "none":
+                        context["requested_action"] = action_data
+                finally:
+                    conn.close()
+
+                response = None
+                try:
+                    logger.info("Calling Gemma for assistant response")
+                    response = run_gemma_prompt(user_message, reply_language, context)
+                    logger.info("Gemma assistant response received: len=%d", len(response) if response else 0)
+                except Exception as exc:
+                    logger.exception("Gemma generation failed")
+                    response = localized_fallback_response(reply_language) + f" ({exc})"
+
+                conn = get_db_connection()
+                try:
+                    action_summary = ""
+                    if action_data.get("action") != "none":
+                        action_summary = perform_business_action(conn, action_data)
+                    final_response = response or action_summary or localized_fallback_response(reply_language)
+                    now = datetime.now().isoformat(timespec="seconds")
+                    conn.execute(
+                        "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
+                        ("user", user_message, now),
+                    )
+                    conn.execute(
+                        "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
+                        ("assistant", final_response, now),
+                    )
+                    conn.commit()
+                    logger.info(
+                        "Assistant messages saved: user_len=%d response_len=%d",
+                        len(user_message),
+                        len(final_response),
+                    )
+                finally:
+                    conn.close()
+
+            return redirect(url_for("assistant"))
+
+        # GET request: retrieve message history
+        conn = get_db_connection()
+        try:
+            messages = conn.execute(
+                "SELECT * FROM assistant_messages ORDER BY id ASC LIMIT 30"
+            ).fetchall()
+            metrics = query_metrics(conn)
+        finally:
+            conn.close()
+
+        return render_template(
+            "assistant.html",
+            active_page="assistant",
+            messages=messages,
+            metrics=metrics,
+            suggested_questions=ASSISTANT_SUGGESTED_QUESTIONS,
+        )
+    except Exception as exc:
+        logger.exception('Assistant route unhandled error: %s', exc)
+        return render_template(
+            "assistant.html",
+            active_page="assistant",
+            messages=[],
+            metrics={},
+            suggested_questions=ASSISTANT_SUGGESTED_QUESTIONS,
+            error=str(exc)
+        )
 
 
 

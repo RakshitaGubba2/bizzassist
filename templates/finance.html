@@ -1,43 +1,43 @@
 {% extends "base.html" %}
-{% block title %}Finance - BizAssist AI{% endblock %}
+{% block title %}{{ t("Finance - BizAssist AI") }}{% endblock %}
 {% block content %}
-<h1 class="page-title">Finance Management</h1>
-<p class="page-subtitle">Track expenses, monitor profit, and forecast future cash flow.</p>
+<h1 class="page-title">{{ t("Finance Management") }}</h1>
+<p class="page-subtitle">{{ t("Track expenses, monitor profit, and forecast future cash flow.") }}</p>
 
 <div class="ai-box">
-    <b>AI Financial Insight</b>
-    <p>Revenue forecast for next month is <b>{{ forecast_revenue|inr }}</b> with better margin if non-essential expenses are optimized.</p>
+    <b>{{ t("AI Financial Insight") }}</b>
+    <p>{{ t("Revenue forecast for next month is") }} <b>{{ forecast_revenue|inr }}</b> {{ t("with better margin if non-essential expenses are optimized.") }}</p>
 </div>
 
 <div class="cards">
-    <div class="card"><h3>Monthly Revenue</h3><div class="metric">{{ monthly_revenue|inr }}</div></div>
-    <div class="card"><h3>Total Expenses</h3><div class="metric">{{ monthly_expenses|inr }}</div></div>
-    <div class="card"><h3>Net Profit</h3><div class="metric">{{ metrics.net_profit|inr }}</div></div>
-    <div class="card"><h3>Forecasted Revenue</h3><div class="metric">{{ forecast_revenue|inr }}</div></div>
+    <div class="card"><h3>{{ t("Monthly Revenue") }}</h3><div class="metric">{{ monthly_revenue|inr }}</div></div>
+    <div class="card"><h3>{{ t("Total Expenses") }}</h3><div class="metric">{{ monthly_expenses|inr }}</div></div>
+    <div class="card"><h3>{{ t("Net Profit") }}</h3><div class="metric">{{ metrics.net_profit|inr }}</div></div>
+    <div class="card"><h3>{{ t("Forecasted Revenue") }}</h3><div class="metric">{{ forecast_revenue|inr }}</div></div>
 </div>
 
 <div class="panel">
-    <h3 class="section-title">Add Expense</h3>
+    <h3 class="section-title">{{ t("Add Expense") }}</h3>
     <form method="post" class="form-grid">
         <input class="input" name="category" placeholder="Category" required>
         <input class="input" name="description" placeholder="Description" required>
         <input class="input" type="number" step="0.01" name="amount" placeholder="Amount (₹)" required>
         <input class="input" type="date" name="expense_date">
-        <button class="btn btn-primary" type="submit">Save Expense</button>
+        <button class="btn btn-primary" type="submit">{{ t("Save Expense") }}</button>
     </form>
 </div>
 
 <div class="row">
 <div class="panel">
-    <h3 class="section-title">Expense Records</h3>
-    <p class="muted" style="margin-bottom:10px;">Edit fields and click <b>Save row</b> to update, or <b>Delete</b> to remove a record.</p>
+    <h3 class="section-title">{{ t("Expense Records") }}</h3>
+    <p class="muted" style="margin-bottom:10px;">{{ t("Edit fields and click") }} <b>{{ t("Save row") }}</b> {{ t("to update, or") }} <b>{{ t("Delete") }}</b> {{ t("to remove a record.") }}</p>
     <table>
         <thead>
             <tr>
-                <th>Category</th>
-                <th>Description</th>
-                <th>Amount (₹)</th>
-                <th>Date</th>
+                <th>{{ t("Category") }}</th>
+                <th>{{ t("Description") }}</th>
+                <th>{{ t("Amount (₹)") }}</th>
+                <th>{{ t("Date") }}</th>
                 <th></th>
             </tr>
         </thead>
@@ -50,10 +50,10 @@
                         <input class="input" name="description" value="{{ expense['description'] }}" required>
                         <input class="input" type="number" step="0.01" name="amount" value="{{ expense['amount'] }}" required>
                         <input class="input" type="date" name="expense_date" value="{{ expense['expense_date'] }}" required>
-                        <button class="btn btn-primary" type="submit">Save row</button>
+                        <button class="btn btn-primary" type="submit">{{ t("Save row") }}</button>
                     </form>
-                    <form method="post" action="{{ url_for('delete_expense', expense_id=expense['id']) }}" style="margin-top:8px;" onsubmit="return confirm('Delete this expense?');">
-                        <button class="btn btn-secondary" type="submit" style="background:#fee2e2;color:#991b1b;">Delete</button>
+                    <form method="post" action="{{ url_for('delete_expense', expense_id=expense['id']) }}" style="margin-top:8px;" onsubmit="return confirm('{{ t("Delete this expense?") }}');">
+                        <button class="btn btn-secondary" type="submit" style="background:#fee2e2;color:#991b1b;">{{ t("Delete") }}</button>
                     </form>
                 </td>
             </tr>
@@ -63,13 +63,13 @@
     </div>
     <div>
         <div class="panel">
-            <h3 class="section-title">Expense Breakdown</h3>
+            <h3 class="section-title">{{ t("Expense Breakdown") }}</h3>
             <canvas id="expenseChart" height="220"></canvas>
         </div>
         <div class="panel">
-            <h3 class="section-title">Next Month Forecast</h3>
-            <p class="muted">Expected Revenue: <b>{{ forecast_revenue|inr }}</b></p>
-            <p class="muted">Expected Expenses: <b>{{ forecast_expenses|inr }}</b></p>
+            <h3 class="section-title">{{ t("Next Month Forecast") }}</h3>
+            <p class="muted">{{ t("Expected Revenue:") }} <b>{{ forecast_revenue|inr }}</b></p>
+            <p class="muted">{{ t("Expected Expenses:") }} <b>{{ forecast_expenses|inr }}</b></p>
         </div>
     </div>
 </div>

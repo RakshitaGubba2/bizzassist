@@ -1,50 +1,50 @@
 {% extends "base.html" %}
-{% block title %}Customers - BizAssist AI{% endblock %}
+{% block title %}{{ t("Customers - BizAssist AI") }}{% endblock %}
 {% block content %}
-<h1 class="page-title">Customer Management</h1>
-<p class="page-subtitle">Capture customer details to power segmentation and insights.</p>
+<h1 class="page-title">{{ t("Customer Management") }}</h1>
+<p class="page-subtitle">{{ t("Capture customer details to power segmentation and insights.") }}</p>
 
 <div class="cards">
-    <div class="card"><h3>Total Customers</h3><div class="metric">{{ metrics.total_customers }}</div></div>
-    <div class="card"><h3>VIP Customers</h3><div class="metric">{{ metrics.vip_customers }}</div></div>
-    <div class="card"><h3>Avg Customer Value</h3><div class="metric">{{ metrics.avg_customer_value|inr }}</div></div>
-    <div class="card"><h3>Revenue Impact</h3><div class="metric">{{ metrics.revenue|inr }}</div></div>
+    <div class="card"><h3>{{ t("Total Customers") }}</h3><div class="metric">{{ metrics.total_customers }}</div></div>
+    <div class="card"><h3>{{ t("VIP Customers") }}</h3><div class="metric">{{ metrics.vip_customers }}</div></div>
+    <div class="card"><h3>{{ t("Avg Customer Value") }}</h3><div class="metric">{{ metrics.avg_customer_value|inr }}</div></div>
+    <div class="card"><h3>{{ t("Revenue Impact") }}</h3><div class="metric">{{ metrics.revenue|inr }}</div></div>
 </div>
 
 <div class="panel">
-    <h3 class="section-title">Add Customer</h3>
+    <h3 class="section-title">{{ t("Add Customer") }}</h3>
     <form method="post" class="form-grid" id="customer-form">
-        <input class="input" name="name" placeholder="Customer Name" required>
-        <input class="input" type="email" name="email" placeholder="Email" required>
-        <input class="input" name="phone" placeholder="Phone" required>
-        <select name="segment"><option>VIP</option><option>Regular</option><option>New</option><option>At Risk</option></select>
-        <input class="input" type="number" name="total_orders" placeholder="Total Orders" required>
+        <input class="input" name="name" placeholder="{{ t('Customer Name') }}" required>
+        <input class="input" type="email" name="email" placeholder="{{ t('Email') }}" required>
+        <input class="input" name="phone" placeholder="{{ t('Phone') }}" required>
+        <select name="segment"><option>{{ t("VIP") }}</option><option>{{ t("Regular") }}</option><option>{{ t("New") }}</option><option>{{ t("At Risk") }}</option></select>
+        <input class="input" type="number" name="total_orders" placeholder="{{ t('Total Orders') }}" required>
         <div style="display:flex; gap:8px;">
-            <input class="input" type="number" step="0.01" min="0" id="total-spent" name="total_spent" placeholder="Total Spent (₹)" required>
+            <input class="input" type="number" step="0.01" min="0" id="total-spent" name="total_spent" placeholder="{{ t('Total Spent (₹)') }}" required>
             <button class="btn btn-secondary" type="button" id="add-spent-btn">+</button>
         </div>
-        <input class="input" type="number" step="0.01" min="0" id="spent-to-add" placeholder="Add Amount (₹)">
+        <input class="input" type="number" step="0.01" min="0" id="spent-to-add" placeholder="{{ t('Add Amount (₹)') }}">
         <input class="input" type="date" name="last_purchase">
-        <button class="btn btn-primary" type="submit">Save Customer</button>
+        <button class="btn btn-primary" type="submit">{{ t("Save Customer") }}</button>
     </form>
 </div>
 
 <div class="panel">
-    <h3 class="section-title">Customer List</h3>
+    <h3 class="section-title">{{ t("Customer List") }}</h3>
     <table>
-        <thead><tr><th>Customer</th><th>Contact</th><th>Segment</th><th>Total Orders</th><th>Total Spent</th><th>Last Purchase</th><th>Delete</th></tr></thead>
+        <thead><tr><th>{{ t("Customer") }}</th><th>{{ t("Contact") }}</th><th>{{ t("Segment") }}</th><th>{{ t("Total Orders") }}</th><th>{{ t("Total Spent (₹)") }}</th><th>{{ t("Last Purchase") }}</th><th>{{ t("Delete") }}</th></tr></thead>
         <tbody>
             {% for c in customers %}
             <tr>
                 <td><b>{{ c["name"] }}</b></td>
                 <td>{{ c["email"] }}<br>{{ c["phone"] }}</td>
-                <td><span class="status {% if c['segment'] == 'VIP' %}status-yellow{% elif c['segment'] == 'Regular' %}status-blue{% else %}status-green{% endif %}">{{ c["segment"] }}</span></td>
+                <td><span class="status {% if c['segment'] == 'VIP' %}status-yellow{% elif c['segment'] == 'Regular' %}status-blue{% else %}status-green{% endif %}">{{ t(c["segment"]) }}</span></td>
                 <td>{{ c["total_orders"] }}</td>
                 <td>{{ c["total_spent"]|inr }}</td>
                 <td>{{ c["last_purchase"] }}</td>
                 <td>
-                    <form method="post" action="/customers/delete/{{ c['id'] }}" onsubmit="return confirm('Delete this customer?');">
-                        <button class="btn btn-secondary" type="submit">Delete</button>
+                    <form method="post" action="/customers/delete/{{ c['id'] }}" onsubmit="return confirm('{{ t("Delete this customer?") }}');">
+                        <button class="btn btn-secondary" type="submit">{{ t("Delete") }}</button>
                     </form>
                 </td>
             </tr>
