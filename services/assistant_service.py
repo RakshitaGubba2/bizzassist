@@ -133,6 +133,7 @@ def run_gemma_prompt(user_message, reply_language, context):
         f"Business context:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
         f"User message:\n{user_message}"
     )
+    logger.info("Gemma request: input_language=%s reply_language=%s prompt=%s", input_language, reply_language, prompt[:2000])
     return gemma.generate_text(prompt, max_output_tokens=1024)
 
 

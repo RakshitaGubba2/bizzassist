@@ -59,10 +59,10 @@ function appendMessage(role, label, message) { const item = document.createEleme
 function speakText(text, locale) { if (!('speechSynthesis' in window) || !text) return; window.speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(text); utterance.lang = locale || 'en-IN'; utterance.onstart = () => updateVoiceStatus('Speaking response...'); utterance.onend = () => updateVoiceStatus('Ready for your next question.'); window.speechSynthesis.speak(utterance); }
 
 async function sendAssistantRequest(payload, typedMessage) {
-    updateVoiceStatus('Gemma 4 is thinking...', true); logVoice('Request sent', Object.keys(payload));
+    updateVoiceStatus('Gemma 4 is thinking...', true); logVoice('Request payload', {hasText: Boolean(payload.message), hasAudio: Boolean(payload.audio), audioBase64Size: (payload.audio || '').length, inputLanguage: payload.input_language, replyLanguage: payload.reply_language});
     try {
         const response = await fetch('/voice_assistant', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-        const data = await response.json(); logVoice('Response received', response.status);
+        const data = await response.json(); logVoice('Response received', {status: response.status, hasReply: Boolean(data.reply), language: data.language, stage: data.stage});
         if (!response.ok || !data.reply) throw new Error(data.error || 'The assistant did not return a reply.');
         appendMessage('user', 'You', data.transcript || typedMessage);
         appendMessage('assistant', 'AI Assistant', data.reply);

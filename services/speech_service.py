@@ -58,18 +58,32 @@ def transcribe_audio_bytes(audio_bytes, language=None, mime_type="audio/webm"):
         if conversion.returncode != 0:
             logger.error("Audio conversion failed: %s", conversion.stderr[-500:])
             raise SpeechTranscriptionError("The recorded audio could not be decoded.")
+        logger.info("Audio converted to WAV: source_bytes=%d wav_bytes=%d", len(audio_bytes), os.path.getsize(output_path))
 
         selected = normalize_language_code(language)
-        locale = VOICE_LOCALES.get(selected, VOICE_LOCALES["en"])
+        locales = [VOICE_LOCALES.get(selected, VOICE_LOCALES["en"])]
+        locales.extend(locale for locale in VOICE_LOCALES.values() if locale not in locales)
         recognizer = sr.Recognizer()
         with sr.AudioFile(output_path) as source:
             audio_data = recognizer.record(source)
-        logger.info("Transcribing audio: bytes=%d locale=%s", len(audio_bytes), locale)
-        transcript = recognizer.recognize_google(audio_data, language=locale).strip()
-        if not transcript:
-            raise SpeechTranscriptionError("No speech was detected. Please try again.")
-        logger.info("Transcription completed: %s", transcript[:200])
-        return transcript
+        logger.info("Transcribing audio: bytes=%d selected_locale=%s", len(audio_bytes), locales[0])
+        transcription_errors = []
+        for locale in locales:
+            try:
+                result = recognizer.recognize_google(audio_data, language=locale, show_all=True)
+                alternatives = result.get("alternative", []) if isinstance(result, dict) else []
+                transcript = next((str(item.get("transcript", "")).strip() for item in alternatives if item.get("transcript")), "")
+                if transcript:
+                    logger.info("Transcription completed: locale=%s transcript=%s", locale, transcript[:200])
+                    return transcript
+                transcription_errors.append(f"{locale}: no speech result")
+            except Exception as exc:
+                logger.warning("Transcription attempt failed: locale=%s error=%r", locale, exc)
+                transcription_errors.append(f"{locale}: {exc}")
+        raise SpeechTranscriptionError(
+            "No speech could be transcribed. Tried supported Indian locales. Details: "
+            + "; ".join(transcription_errors[:3])
+        )
     except SpeechTranscriptionError:
         raise
     except subprocess.TimeoutExpired as exc:

@@ -173,6 +173,7 @@ def voice_assistant():
         data = request.get_json(silent=True) or {}
         user_message = str(data.get("message", "") or "").strip()[:4000]
         audio_b64 = str(data.get("audio", "") or "").strip()
+        audio_mime_type = str(data.get("audio_mime_type", "audio/webm"))
         input_language = normalize_language_code(
             data.get("input_language") or session.get("language") or "en"
         )
@@ -181,23 +182,26 @@ def voice_assistant():
         )
 
         logger.info(
-            "Assistant request received: has_text=%s has_audio=%s input_language=%s reply_language=%s",
-            bool(user_message), bool(audio_b64), input_language, reply_language,
+            "Assistant request received: has_text=%s has_audio=%s mime=%s input_language=%s reply_language=%s",
+            bool(user_message), bool(audio_b64), audio_mime_type, input_language, reply_language,
         )
         if audio_b64:
             try:
                 audio_bytes = base64.b64decode(audio_b64, validate=True)
+                logger.info("Audio decoded: mime=%s base64_chars=%d audio_bytes=%d", audio_mime_type, len(audio_b64), len(audio_bytes))
+                if not audio_bytes:
+                    return jsonify({"error": "The recording was empty. Please record your question again."}), 400
                 if len(audio_bytes) > 10 * 1024 * 1024:
                     return jsonify({"error": "Recorded audio is too large. Please keep recordings under 10 MB."}), 413
                 user_message = transcribe_audio_bytes(
                     audio_bytes,
                     language=input_language,
-                    mime_type=str(data.get("audio_mime_type", "audio/webm")),
+                    mime_type=audio_mime_type,
                 )
                 logger.info("Audio transcription received: %s", user_message[:200])
             except (ValueError, SpeechTranscriptionError) as exc:
                 logger.warning("Voice transcription failed: %s", exc)
-                return jsonify({"error": str(exc), "stage": "transcription"}), 422
+                return jsonify({"error": str(exc), "stage": "transcription"}), 502
 
         if not user_message:
             return jsonify({"error": "Type a message or record your question first."}), 400
@@ -221,6 +225,8 @@ def voice_assistant():
             logger.info("Gemma status before generation: ready=%s model=%s", gemma.is_ready(), gemma.model_name)
             response_text = run_gemma_prompt(user_message, reply_language, context)
             logger.info("Gemma response: %s", (response_text or "")[:200])
+            if not (response_text or "").strip():
+                return jsonify({"error": "Gemma 4 returned an empty response.", "stage": "generation"}), 503
         except Exception as exc:
             logger.exception("Gemma generation failed")
             return jsonify({"error": f"Gemma 4 is unavailable: {exc}", "stage": "generation"}), 503
@@ -230,7 +236,7 @@ def voice_assistant():
             action_summary = ""
             if action_data.get("action") != "none":
                 action_summary = perform_business_action(conn, action_data)
-            final_response = response_text or action_summary or localized_fallback_response(reply_language)
+            final_response = response_text
             now = datetime.now().isoformat(timespec="seconds")
             conn.execute(
                 "INSERT INTO assistant_messages (role, message, created_at) VALUES (?, ?, ?)",
@@ -257,7 +263,7 @@ def voice_assistant():
         })
     except Exception as exc:
         logger.exception("Voice assistant unhandled error: %s", exc)
-        return jsonify({"error": str(exc), "reply": localized_fallback_response(session.get("reply_language", "en"))}), 500
+        return jsonify({"error": "The assistant request failed: " + str(exc), "stage": "request"}), 500
 DEFAULT_CAMPAIGN_RECIPIENTS = ()
 
 
