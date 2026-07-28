@@ -22,7 +22,7 @@ from services.language_manager import (
 )
 from services.app_services import get_gemma, get_translation, init_services
 from services.i18n import current_reply_language, t
-from services.speech_service import transcribe_audio_bytes
+from services.speech_service import SpeechTranscriptionError, transcribe_audio_bytes
 from services.assistant_service import (
     build_ai_context as assistant_build_ai_context,
     extract_action,
@@ -171,28 +171,41 @@ def persist_language(response):
 def voice_assistant():
     try:
         data = request.get_json(silent=True) or {}
-        user_message = str(data.get("message", "") or "").strip()
+        user_message = str(data.get("message", "") or "").strip()[:4000]
         audio_b64 = str(data.get("audio", "") or "").strip()
+        input_language = normalize_language_code(
+            data.get("input_language") or session.get("language") or "en"
+        )
         reply_language = normalize_language_code(
-            data.get("reply_language") or session.get("reply_language") or session.get("language") or "en"
+            data.get("reply_language") or input_language
         )
 
-        logger.info("Voice assistant request: reply_language=%s, has_audio=%s", reply_language, bool(audio_b64))
+        logger.info(
+            "Assistant request received: has_text=%s has_audio=%s input_language=%s reply_language=%s",
+            bool(user_message), bool(audio_b64), input_language, reply_language,
+        )
         if audio_b64:
             try:
-                audio_bytes = base64.b64decode(audio_b64)
-                transcribed = transcribe_audio_bytes(audio_bytes, language=None)
-                user_message = transcribed or user_message
-                logger.info("Voice recognition result: %s", user_message)
-            except Exception:
-                user_message = ""
+                audio_bytes = base64.b64decode(audio_b64, validate=True)
+                if len(audio_bytes) > 10 * 1024 * 1024:
+                    return jsonify({"error": "Recorded audio is too large. Please keep recordings under 10 MB."}), 413
+                user_message = transcribe_audio_bytes(
+                    audio_bytes,
+                    language=input_language,
+                    mime_type=str(data.get("audio_mime_type", "audio/webm")),
+                )
+                logger.info("Audio transcription received: %s", user_message[:200])
+            except (ValueError, SpeechTranscriptionError) as exc:
+                logger.warning("Voice transcription failed: %s", exc)
+                return jsonify({"error": str(exc), "stage": "transcription"}), 422
 
         if not user_message:
-            return jsonify({
-                "reply": localized_fallback_response(reply_language),
-                "language": reply_language,
-                "voice_language": speech_language(reply_language),
-            })
+            return jsonify({"error": "Type a message or record your question first."}), 400
+
+        detected_language = detect_language_from_text(user_message, input_language)
+        if not data.get("reply_language"):
+            reply_language = detected_language
+        logger.info("Assistant language detected: %s; response language: %s", detected_language, reply_language)
 
         conn = get_db_connection()
         try:
@@ -203,15 +216,14 @@ def voice_assistant():
         finally:
             conn.close()
 
-        response_text = None
         try:
             gemma = get_gemma()
             logger.info("Gemma status before generation: ready=%s model=%s", gemma.is_ready(), gemma.model_name)
             response_text = run_gemma_prompt(user_message, reply_language, context)
             logger.info("Gemma response: %s", (response_text or "")[:200])
         except Exception as exc:
-            logger.exception("Assistant failed")
-            response_text = localized_fallback_response(reply_language) + f" ({exc})"
+            logger.exception("Gemma generation failed")
+            return jsonify({"error": f"Gemma 4 is unavailable: {exc}", "stage": "generation"}), 503
 
         conn = get_db_connection()
         try:
@@ -239,6 +251,7 @@ def voice_assistant():
 
         return jsonify({
             "reply": final_response,
+            "transcript": user_message,
             "language": reply_language,
             "voice_language": speech_language(reply_language),
         })

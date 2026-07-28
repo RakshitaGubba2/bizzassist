@@ -1,48 +1,86 @@
+"""Server-side transcription for MediaRecorder WebM uploads."""
+import logging
 import os
+import shutil
+import subprocess
 import tempfile
 
-from .language_manager import VOICE_LOCALES
+from .language_manager import VOICE_LOCALES, normalize_language_code
+
+logger = logging.getLogger(__name__)
 
 
-def transcribe_audio_bytes(audio_bytes, language=None):
+class SpeechTranscriptionError(RuntimeError):
+    """Raised when uploaded speech cannot be converted or transcribed."""
+
+
+def _ffmpeg_executable():
+    configured = os.environ.get("SPEECH_FFMPEG_PATH", "").strip()
+    if configured:
+        return configured
+    system_binary = shutil.which("ffmpeg")
+    if system_binary:
+        return system_binary
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError as exc:
+        raise SpeechTranscriptionError(
+            "Audio decoding is unavailable. Install the project requirements or set SPEECH_FFMPEG_PATH."
+        ) from exc
+
+
+def transcribe_audio_bytes(audio_bytes, language=None, mime_type="audio/webm"):
+    """Convert a browser recording to WAV and transcribe it using the selected locale.
+
+    MediaRecorder produces WebM/Opus in Chrome and Edge; SpeechRecognition's
+    AudioFile reader only accepts PCM formats, so decoding must happen first.
+    """
     if not audio_bytes:
-        return ""
+        raise SpeechTranscriptionError("No audio was received.")
 
     try:
         import speech_recognition as sr
-    except ImportError:
-        return ""
+    except ImportError as exc:
+        raise SpeechTranscriptionError("SpeechRecognition is not installed. Run pip install -r requirements.txt.") from exc
 
-    tmp_path = None
+    suffix = ".webm" if "webm" in (mime_type or "").lower() else ".audio"
+    input_path = output_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = tmp.name
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as source_file:
+            source_file.write(audio_bytes)
+            input_path = source_file.name
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as output_file:
+            output_path = output_file.name
+
+        command = [_ffmpeg_executable(), "-y", "-i", input_path, "-ac", "1", "-ar", "16000", output_path]
+        conversion = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+        if conversion.returncode != 0:
+            logger.error("Audio conversion failed: %s", conversion.stderr[-500:])
+            raise SpeechTranscriptionError("The recorded audio could not be decoded.")
+
+        selected = normalize_language_code(language)
+        locale = VOICE_LOCALES.get(selected, VOICE_LOCALES["en"])
         recognizer = sr.Recognizer()
-        with sr.AudioFile(tmp_path) as source:
+        with sr.AudioFile(output_path) as source:
             audio_data = recognizer.record(source)
-        # Google Web Speech needs a locale hint.  For uploaded audio there is
-        # no trustworthy browser locale, so probe all supported locales and
-        # keep the highest-confidence transcript.  A selected input locale,
-        # when supplied, is tried first.
-        locales = [language] if language else []
-        locales.extend(locale for locale in VOICE_LOCALES.values() if locale not in locales)
-        candidates = []
-        for locale in locales:
-            try:
-                result = recognizer.recognize_google(audio_data, language=locale, show_all=True)
-                for alternative in (result.get("alternative", []) if isinstance(result, dict) else []):
-                    transcript = str(alternative.get("transcript", "")).strip()
-                    if transcript:
-                        candidates.append((float(alternative.get("confidence", 0)), transcript))
-            except Exception:
-                continue
-        return max(candidates, default=(0, ""), key=lambda item: item[0])[1]
-    except Exception:
-        return ""
+        logger.info("Transcribing audio: bytes=%d locale=%s", len(audio_bytes), locale)
+        transcript = recognizer.recognize_google(audio_data, language=locale).strip()
+        if not transcript:
+            raise SpeechTranscriptionError("No speech was detected. Please try again.")
+        logger.info("Transcription completed: %s", transcript[:200])
+        return transcript
+    except SpeechTranscriptionError:
+        raise
+    except subprocess.TimeoutExpired as exc:
+        raise SpeechTranscriptionError("Audio conversion timed out.") from exc
+    except Exception as exc:
+        logger.exception("Speech transcription failed")
+        raise SpeechTranscriptionError("Speech could not be transcribed. Please try again or type your question.") from exc
     finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        for path in (input_path, output_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
